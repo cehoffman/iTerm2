@@ -58,7 +58,6 @@ static const int MAX_WORKING_DIR_COUNT = 50;
 #import "iTermExpose.h"
 #import "RegexKitLite/RegexKitLite.h"
 #import "iTerm/NSStringITerm.h"
-#import "FontSizeEstimator.h"
 #import "MovePaneController.h"
 #import "FutureMethods.h"
 
@@ -698,13 +697,22 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 
 + (NSSize)charSizeForFont:(NSFont*)aFont horizontalSpacing:(double)hspace verticalSpacing:(double)vspace baseline:(double*)baseline
 {
-    FontSizeEstimator* fse = [FontSizeEstimator fontSizeEstimatorForFont:aFont];
-    NSSize size = [fse size];
-    size.width = ceil(size.width * hspace);
-    size.height = ceil(vspace * ceil(size.height + [aFont leading]));
+    NSSize size;
+
+    NSDictionary *a = [NSDictionary dictionaryWithObject:aFont forKey:NSFontAttributeName];
+    size.width = [@"m" sizeWithAttributes:a].width + hspace;
+
+    NSLayoutManager *lm = [[NSLayoutManager alloc] init];
+    size.height = [lm defaultLineHeightForFont:aFont] + vspace;
+    [lm release];
+
     if (baseline) {
-        *baseline = [fse baseline];
+      // Note: MacVim uses a user default for the -1 used below. Would probably
+      // not hurt to follow that example and provide a user adjustable value
+      // for the baseline adjustment.
+      *baseline = [aFont descender] - 0.5 * vspace - 1;
     }
+
     return size;
 }
 
@@ -730,16 +738,16 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 {
     double baseline;
     NSSize sz = [PTYTextView charSizeForFont:aFont
-                           horizontalSpacing:1.0
-                             verticalSpacing:1.0
+                           horizontalSpacing:horizontalSpacing
+                             verticalSpacing:verticalSpacing
                                     baseline:&baseline];
 
-    charWidthWithoutSpacing = sz.width;
-    charHeightWithoutSpacing = sz.height;
+    charWidthWithoutSpacing = sz.width - horizontalSpacing;
+    charHeightWithoutSpacing = sz.height - verticalSpacing;
     horizontalSpacing_ = horizontalSpacing;
     verticalSpacing_ = verticalSpacing;
-    charWidth = ceil(charWidthWithoutSpacing * horizontalSpacing);
-    lineHeight = ceil(charHeightWithoutSpacing * verticalSpacing);
+    charWidth = sz.width;
+    lineHeight = sz.height;
     [self modifyFont:aFont baseline:baseline info:&primaryFont];
     [self modifyFont:naFont baseline:baseline info:&secondaryFont];
 
