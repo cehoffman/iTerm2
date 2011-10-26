@@ -37,6 +37,9 @@
 #import "PasteboardHistory.h"
 #import "SessionView.h"
 #import "WindowArrangements.h"
+#import "TriggerController.h"
+#import "SmartSelectionController.h"
+#import "TrouterPrefsController.h"
 
 #define CUSTOM_COLOR_PRESETS @"Custom Color Presets"
 #define HOTKEY_WINDOW_GENERATED_PROFILE_NAME @"Hotkey Window"
@@ -186,11 +189,12 @@ static float versionNumber;
     }
 }
 
-- (void)setOneBokmarkOnly
+- (void)setOneBookmarkOnly
 {
     oneBookmarkOnly = YES;
     [self showBookmarks];
     [toolbar setVisible:NO];
+    [editAdvancedConfigButton setHidden:YES];
     [bookmarksTableView setHidden:YES];
     [addBookmarkButton setHidden:YES];
     [removeBookmarkButton setHidden:YES];
@@ -555,12 +559,13 @@ static float versionNumber;
     [[self window] setCollectionBehavior:NSWindowCollectionBehaviorMoveToActiveSpace];
     NSAssert(bookmarksTableView, @"Null table view");
     [bookmarksTableView setUnderlyingDatasource:dataSource];
-
     bookmarksToolbarId = [bookmarksToolbarItem itemIdentifier];
     globalToolbarId = [globalToolbarItem itemIdentifier];
     appearanceToolbarId = [appearanceToolbarItem itemIdentifier];
     keyboardToolbarId = [keyboardToolbarItem itemIdentifier];
     arrangementsToolbarId = [arrangementsToolbarItem itemIdentifier];
+
+    [globalToolbarItem setEnabled:YES];
     [toolbar setSelectedItemIdentifier:globalToolbarId];
 
     // add list of encodings
@@ -598,7 +603,7 @@ static float versionNumber;
                                              selector:@selector(handleWindowWillCloseNotification:)
                                                  name:NSWindowWillCloseNotification object: [self window]];
     if (oneBookmarkMode) {
-        [self setOneBokmarkOnly];
+        [self setOneBookmarkOnly];
     }
     [[tags cell] setDelegate:self];
     [tags setDelegate:self];
@@ -636,6 +641,131 @@ static float versionNumber;
 - (BOOL)_originatorIsBookmark:(id)originator
 {
     return originator == addNewMapping || originator == keyMappings;
+}
+
+- (void)setAdvancedBookmarkMatrix:(NSMatrix *)matrix withValue:(NSString *)value
+{
+    if ([value isEqualToString:@"Yes"]) {
+        [matrix selectCellWithTag:0];
+    } else if ([value isEqualToString:@"Recycle"]) {
+        [matrix selectCellWithTag:2];
+    } else {
+        [matrix selectCellWithTag:1];
+    }
+}
+
+- (void)safelySetStringValue:(NSString *)value in:(NSTextField *)field
+{
+    if (value) {
+        [field setStringValue:value];
+    } else {
+        [field setStringValue:@""];
+    }
+}
+
+- (IBAction)showAdvancedWorkingDirConfigPanel:(id)sender
+{
+    // Populate initial values
+    Bookmark* bookmark = [dataSource bookmarkWithGuid:[bookmarksTableView selectedGuid]];
+
+    [self setAdvancedBookmarkMatrix:awdsWindowDirectoryType
+                          withValue:[bookmark objectForKey:KEY_AWDS_WIN_OPTION]];
+    [self safelySetStringValue:[bookmark objectForKey:KEY_AWDS_WIN_DIRECTORY] 
+                            in:awdsWindowDirectory];
+
+    [self setAdvancedBookmarkMatrix:awdsTabDirectoryType
+                          withValue:[bookmark objectForKey:KEY_AWDS_TAB_OPTION]];
+    [self safelySetStringValue:[bookmark objectForKey:KEY_AWDS_TAB_DIRECTORY]
+                            in:awdsTabDirectory];
+
+    [self setAdvancedBookmarkMatrix:awdsPaneDirectoryType
+                          withValue:[bookmark objectForKey:KEY_AWDS_PANE_OPTION]];
+    [self safelySetStringValue:[bookmark objectForKey:KEY_AWDS_PANE_DIRECTORY]
+                            in:awdsPaneDirectory];
+
+
+    [NSApp beginSheet:advancedWorkingDirSheet_
+       modalForWindow:[self window]
+        modalDelegate:self
+       didEndSelector:@selector(advancedWorkingDirSheetClosed:returnCode:contextInfo:)
+          contextInfo:nil];
+}
+
+- (void)setValueInBookmark:(NSMutableDictionary *)dict
+        forAdvancedWorkingDirMatrix:(NSMatrix *)matrix
+        key:(NSString *)key
+{
+    NSString *value;
+    NSString *values[] = { @"Yes", @"No", @"Recycle" };
+    value = values[matrix.selectedTag];
+    [dict setObject:value forKey:key];
+}
+
+- (IBAction)closeAdvancedWorkingDirSheet:(id)sender
+{
+    Bookmark* bookmark = [dataSource bookmarkWithGuid:[bookmarksTableView selectedGuid]];
+    NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithDictionary:bookmark];
+    [self setValueInBookmark:dict
+          forAdvancedWorkingDirMatrix:awdsWindowDirectoryType
+          key:KEY_AWDS_WIN_OPTION];
+    [dict setObject:[awdsWindowDirectory stringValue] forKey:KEY_AWDS_WIN_DIRECTORY];
+
+    [self setValueInBookmark:dict
+          forAdvancedWorkingDirMatrix:awdsTabDirectoryType
+          key:KEY_AWDS_TAB_OPTION];
+    [dict setObject:[awdsTabDirectory stringValue] forKey:KEY_AWDS_TAB_DIRECTORY];
+
+    [self setValueInBookmark:dict
+          forAdvancedWorkingDirMatrix:awdsPaneDirectoryType
+          key:KEY_AWDS_PANE_OPTION];
+    [dict setObject:[awdsPaneDirectory stringValue] forKey:KEY_AWDS_PANE_DIRECTORY];
+
+    [dataSource setBookmark:dict withGuid:[bookmark objectForKey:KEY_GUID]];
+    [self bookmarkSettingChanged:nil];
+
+    [NSApp endSheet:advancedWorkingDirSheet_];
+}
+
+- (void)advancedWorkingDirSheetClosed:(NSWindow *)sheet
+                           returnCode:(int)returnCode
+                          contextInfo:(void *)contextInfo
+{
+    [sheet close];
+}
+
+- (IBAction)editSmartSelection:(id)sender
+{
+    [smartSelectionWindowController_ window];
+    [smartSelectionWindowController_ windowWillOpen];
+    [NSApp beginSheet:[smartSelectionWindowController_ window]
+       modalForWindow:[self window]
+        modalDelegate:self
+       didEndSelector:@selector(advancedTabCloseSheet:returnCode:contextInfo:)
+          contextInfo:nil];
+}
+
+- (IBAction)closeSmartSelectionSheet:(id)sender
+{
+    [NSApp endSheet:[smartSelectionWindowController_ window]];
+}
+
+- (void)advancedTabCloseSheet:(NSWindow *)sheet returnCode:(int)returnCode contextInfo:(void *)contextInfo
+{
+    [sheet close];
+}
+
+- (IBAction)editTriggers:(id)sender
+{
+    [NSApp beginSheet:[triggerWindowController_ window]
+       modalForWindow:[self window]
+        modalDelegate:self
+       didEndSelector:@selector(advancedTabCloseSheet:returnCode:contextInfo:)
+          contextInfo:nil];
+}
+
+- (IBAction)closeTriggersSheet:(id)sender
+{
+    [NSApp endSheet:[triggerWindowController_ window]];
 }
 
 - (IBAction)closeCurrentSession:(id)sender
@@ -1020,6 +1150,7 @@ static float versionNumber;
     defaultQuitWhenAllWindowsClosed = [prefs objectForKey:@"QuitWhenAllWindowsClosed"]?[[prefs objectForKey:@"QuitWhenAllWindowsClosed"] boolValue]: NO;
     defaultCheckUpdate = [prefs objectForKey:@"SUEnableAutomaticChecks"]?[[prefs objectForKey:@"SUEnableAutomaticChecks"] boolValue]: YES;
     defaultHideScrollbar = [prefs objectForKey:@"HideScrollbar"]?[[prefs objectForKey:@"HideScrollbar"] boolValue]: NO;
+    defaultShowPaneTitles = [prefs objectForKey:@"ShowPaneTitles"]?[[prefs objectForKey:@"ShowPaneTitles"] boolValue]: YES;
     defaultDisableFullscreenTransparency = [prefs objectForKey:@"DisableFullscreenTransparency"] ? [[prefs objectForKey:@"DisableFullscreenTransparency"] boolValue] : NO;
     defaultSmartPlacement = [prefs objectForKey:@"SmartPlacement"]?[[prefs objectForKey:@"SmartPlacement"] boolValue]: NO;
     defaultWindowNumber = [prefs objectForKey:@"WindowNumber"]?[[prefs objectForKey:@"WindowNumber"] boolValue]: YES;
@@ -1140,6 +1271,7 @@ static float versionNumber;
     [prefs setBool:defaultQuitWhenAllWindowsClosed forKey:@"QuitWhenAllWindowsClosed"];
     [prefs setBool:defaultCheckUpdate forKey:@"SUEnableAutomaticChecks"];
     [prefs setBool:defaultHideScrollbar forKey:@"HideScrollbar"];
+    [prefs setBool:defaultShowPaneTitles forKey:@"ShowPaneTitles"];
     [prefs setBool:defaultDisableFullscreenTransparency forKey:@"DisableFullscreenTransparency"];
     [prefs setBool:defaultSmartPlacement forKey:@"SmartPlacement"];
     [prefs setBool:defaultWindowNumber forKey:@"WindowNumber"];
@@ -1230,6 +1362,7 @@ static float versionNumber;
     [quitWhenAllWindowsClosed setState: defaultQuitWhenAllWindowsClosed?NSOnState:NSOffState];
     [checkUpdate setState: defaultCheckUpdate?NSOnState:NSOffState];
     [hideScrollbar setState: defaultHideScrollbar?NSOnState:NSOffState];
+    [showPaneTitles setState:defaultShowPaneTitles?NSOnState:NSOffState];
     [disableFullscreenTransparency setState:defaultDisableFullscreenTransparency ? NSOnState : NSOffState];
     [smartPlacement setState: defaultSmartPlacement?NSOnState:NSOffState];
     [windowNumber setState: defaultWindowNumber?NSOnState:NSOffState];
@@ -1406,6 +1539,7 @@ static float versionNumber;
         sender == hideActivityIndicator ||
         sender == highlightTabLabels ||
         sender == hideScrollbar ||
+        sender == showPaneTitles ||
         sender == disableFullscreenTransparency ||
         sender == advancedFontRendering ||
         sender == strokeThickness ||
@@ -1421,6 +1555,7 @@ static float versionNumber;
         defaultUseCompactLabel = ([useCompactLabel state] == NSOnState);
         defaultHideActivityIndicator = ([hideActivityIndicator state] == NSOnState);
         defaultHighlightTabLabels = ([highlightTabLabels state] == NSOnState);
+        defaultShowPaneTitles = ([showPaneTitles state] == NSOnState);
         defaultAdvancedFontRendering = ([advancedFontRendering state] == NSOnState);
         [strokeThickness setEnabled:defaultAdvancedFontRendering];
         [strokeThicknessLabel setTextColor:defaultAdvancedFontRendering ? [NSColor blackColor] : [NSColor disabledControlTextColor]];
@@ -1737,6 +1872,11 @@ static float versionNumber;
 - (BOOL)hideScrollbar
 {
     return defaultHideScrollbar;
+}
+
+- (BOOL)showPaneTitles
+{
+    return defaultShowPaneTitles;
 }
 
 - (BOOL)disableFullscreenTransparency
@@ -2436,13 +2576,19 @@ static float versionNumber;
     [bookmarkCommand setStringValue:command];
     [initialText setStringValue:text];
 
+    BOOL enabledAdvancedEdit = NO;
     if ([customDir isEqualToString:@"Yes"]) {
-            [bookmarkDirectoryType selectCellWithTag:0];
+        [bookmarkDirectoryType selectCellWithTag:0];
     } else if ([customDir isEqualToString:@"Recycle"]) {
-            [bookmarkDirectoryType selectCellWithTag:2];
+        [bookmarkDirectoryType selectCellWithTag:2];
+    } else if ([customDir isEqualToString:@"Advanced"]) {
+        [bookmarkDirectoryType selectCellWithTag:3];
+        enabledAdvancedEdit = YES;
     } else {
-            [bookmarkDirectoryType selectCellWithTag:1];
+        [bookmarkDirectoryType selectCellWithTag:1];
     }
+    [editAdvancedConfigButton setEnabled:enabledAdvancedEdit];
+
     [bookmarkDirectory setStringValue:dir];
     [self _populateBookmarkUrlSchemesFromDict:dict];
 
@@ -2586,6 +2732,7 @@ static float versionNumber;
     [scrollbackInAlternateScreen setState:[dict objectForKey:KEY_SCROLLBACK_IN_ALTERNATE_SCREEN] ? 
          ([[dict objectForKey:KEY_SCROLLBACK_IN_ALTERNATE_SCREEN] boolValue] ? NSOnState : NSOffState) : NSOnState];
     [bookmarkGrowlNotifications setState:[[dict objectForKey:KEY_BOOKMARK_GROWL_NOTIFICATIONS] boolValue] ? NSOnState : NSOffState];
+    [setLocaleVars setState:[dict objectForKey:KEY_SET_LOCALE_VARS] ? ([[dict objectForKey:KEY_SET_LOCALE_VARS] boolValue] ? NSOnState : NSOffState) : NSOnState];
     [autoLog setState:[[dict objectForKey:KEY_AUTOLOG] boolValue] ? NSOnState : NSOffState];
     [logDir setStringValue:[dict objectForKey:KEY_LOGDIR] ? [dict objectForKey:KEY_LOGDIR] : @""];
     [logDir setEnabled:[autoLog state] == NSOnState];
@@ -2848,11 +2995,16 @@ static float versionNumber;
             customDir = @"Recycle";
             break;
 
+        case 3:
+            customDir = @"Advanced";
+            break;
+
         case 1:
         default:
             customDir = @"No";
             break;
     }
+    [editAdvancedConfigButton setEnabled:[customDir isEqualToString:@"Advanced"]];
 
     if (sender == optionKeySends && [[optionKeySends selectedCell] tag] == OPT_META) {
         [self _maybeWarnAboutMeta];
@@ -2902,6 +3054,22 @@ static float versionNumber;
     [newDict setObject:dir forKey:KEY_WORKING_DIRECTORY];
     [newDict setObject:customCommand forKey:KEY_CUSTOM_COMMAND];
     [newDict setObject:customDir forKey:KEY_CUSTOM_DIRECTORY];
+
+    // Just copy over advanced working dir settings
+    NSArray *valuesToCopy = [NSArray arrayWithObjects:
+        KEY_AWDS_WIN_OPTION,
+        KEY_AWDS_WIN_DIRECTORY,
+        KEY_AWDS_TAB_OPTION,
+        KEY_AWDS_TAB_DIRECTORY,
+        KEY_AWDS_PANE_OPTION,
+        KEY_AWDS_PANE_DIRECTORY,
+        nil];
+    for (NSString *key in valuesToCopy) {
+        id value = [origBookmark objectForKey:key];
+        if (value) {
+            [newDict setObject:value forKey:key];
+        }
+    }
 
     // Colors tab
     [newDict setObject:[ITAddressBookMgr encodeColor:[ansi0Color color]] forKey:KEY_ANSI_0_COLOR];
@@ -2995,6 +3163,7 @@ static float versionNumber;
     [newDict setObject:[NSNumber numberWithBool:([scrollbackWithStatusBar state]==NSOnState)] forKey:KEY_SCROLLBACK_WITH_STATUS_BAR];
     [newDict setObject:[NSNumber numberWithBool:([scrollbackInAlternateScreen state]==NSOnState)] forKey:KEY_SCROLLBACK_IN_ALTERNATE_SCREEN];
     [newDict setObject:[NSNumber numberWithBool:([bookmarkGrowlNotifications state]==NSOnState)] forKey:KEY_BOOKMARK_GROWL_NOTIFICATIONS];
+    [newDict setObject:[NSNumber numberWithBool:([setLocaleVars state]==NSOnState)] forKey:KEY_SET_LOCALE_VARS];
     [newDict setObject:[NSNumber numberWithBool:([autoLog state]==NSOnState)] forKey:KEY_AUTOLOG];
     [newDict setObject:[logDir stringValue] forKey:KEY_LOGDIR];
     [logDir setEnabled:[autoLog state] == NSOnState];
@@ -3040,6 +3209,11 @@ static float versionNumber;
                 forKey:KEY_PROMPT_CLOSE];
     [newDict setObject:[origBookmark objectForKey:KEY_JOBS] ? [origBookmark objectForKey:KEY_JOBS] : [NSArray array]
                 forKey:KEY_JOBS];
+
+    // Advanced tab
+    [newDict setObject:[triggerWindowController_ triggers] forKey:KEY_TRIGGERS];
+    [newDict setObject:[smartSelectionWindowController_ rules] forKey:KEY_SMART_SELECTION_RULES];
+    [newDict setObject:[trouterPrefController_ prefs] forKey:KEY_TROUTER];
 
     // Epilogue
     [dataSource setBookmark:newDict withGuid:guid];
@@ -3104,6 +3278,9 @@ static float versionNumber;
         [removeBookmarkButton setEnabled:NO];
         if (bookmarkTable == bookmarksTableView) {
             NSString* guid = [bookmarksTableView selectedGuid];
+            triggerWindowController_.guid = guid;
+            smartSelectionWindowController_.guid = guid;
+            trouterPrefController_.guid = guid;
             [self updateBookmarkFields:[dataSource bookmarkWithGuid:guid]];
         }
     }
@@ -3656,6 +3833,7 @@ static float versionNumber;
     [newDict setObject:newName forKey:KEY_NAME];
     [newDict setObject:[BookmarkModel freshGuid] forKey:KEY_GUID];
     [newDict setObject:@"No" forKey:KEY_DEFAULT_BOOKMARK];
+    [newDict setObject:@"" forKey:KEY_SHORTCUT];
     [dataSource addBookmark:newDict];
     [bookmarksTableView reloadData];
     [bookmarksTableView selectRowByGuid:[newDict objectForKey:KEY_GUID]];
@@ -3771,6 +3949,9 @@ static float versionNumber;
         if ([copySession state] == NSOnState) {
             [self copyAttributes:BulkCopySession fromBookmark:srcGuid toBookmark:destGuid];
         }
+        if ([copyAdvanced state] == NSOnState) {
+            [self copyAttributes:BulkCopyAdvanced fromBookmark:srcGuid toBookmark:destGuid];
+        }
     }
     [NSApp endSheet:copyPanel];
 }
@@ -3857,15 +4038,21 @@ static float versionNumber;
     NSString *sessionKeys[] = {
         KEY_CLOSE_SESSIONS_ON_END,
         KEY_BOOKMARK_GROWL_NOTIFICATIONS,
+        KEY_SET_LOCALE_VARS,
         KEY_AUTOLOG,
         KEY_LOGDIR,
         KEY_SEND_CODE_WHEN_IDLE,
         KEY_IDLE_CODE,
     };
-    
+
     NSString* keyboardKeys[] = {
         KEY_KEYBOARD_MAP,
         KEY_OPTION_KEY_SENDS,
+        nil
+    };
+    NSString *advancedKeys[] = {
+        KEY_TRIGGERS,
+        KEY_SMART_SELECTION_RULES,
         nil
     };
     switch (attributes) {
@@ -3886,6 +4073,9 @@ static float versionNumber;
             break;
         case BulkCopySession:
             keys = sessionKeys;
+            break;
+        case BulkCopyAdvanced:
+            keys = advancedKeys;
             break;
         default:
             NSLog(@"Unexpected copy attribute %d", (int)attributes);
@@ -3927,6 +4117,16 @@ static float versionNumber;
     } else {
         return nil;
     }
+}
+
+- (void)triggerChanged:(TriggerController *)triggerController
+{
+  [self bookmarkSettingChanged:nil];
+}
+
+- (void)smartSelectionChanged:(SmartSelectionController *)smartSelectionController
+{
+    [self bookmarkSettingChanged:nil];
 }
 
 @end

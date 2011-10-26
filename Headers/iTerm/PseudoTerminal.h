@@ -231,12 +231,19 @@ NSWindowDelegate,
 
     // In 10.7 style full screen mode
     BOOL lionFullScreen_;
-    
+
     // Drawer view, which only exists for window_type normal.
     NSDrawer *drawer_;
-    
+
     // Toolbelt view which goes in the drawer, or perhaps other places in the future.
     ToolbeltView *toolbelt_;
+
+    IBOutlet NSPanel *coprocesssPanel_;
+    IBOutlet NSButton *coprocessOkButton_;
+    IBOutlet NSTextField *coprocessCommand_;
+
+    NSDictionary *lastArrangement_;
+    BOOL wellFormed_;
 }
 
 + (void)drawArrangementPreview:(NSDictionary*)terminalArrangement
@@ -262,6 +269,8 @@ NSWindowDelegate,
 
 // The window's original screen.
 - (NSScreen*)screen;
+
+- (void)setFrameValue:(NSValue *)value;
 
 // The PTYWindow for this controller.
 - (PTYWindow*)ptyWindow;
@@ -308,9 +317,16 @@ NSWindowDelegate,
 
 - (void)toggleFullScreenTabBar;
 
+- (IBAction)runCoprocess:(id)sender;
+- (IBAction)stopCoprocess:(id)sender;
+- (IBAction)coprocessPanelEnd:(id)sender;
+- (IBAction)coprocessHelp:(id)sender;
+
 - (IBAction)openSplitHorizontallySheet:(id)sender;
 - (IBAction)openSplitVerticallySheet:(id)sender;
 - (IBAction)findCursor:(id)sender;
+
+- (void)futureInvalidateRestorableState;
 
 // Close the active session.
 - (IBAction)closeCurrentSession:(id)sender;
@@ -665,7 +681,9 @@ NSWindowDelegate,
 // Return the smallest allowable width for this terminal.
 - (float)minWidth;
 
++ (PseudoTerminal*)bareTerminalWithArrangement:(NSDictionary*)arrangement;
 + (PseudoTerminal*)terminalWithArrangement:(NSDictionary*)arrangement;
+- (void)loadArrangement:(NSDictionary *)arrangement;
 - (NSDictionary*)arrangement;
 
 - (void)appendTab:(PTYTab*)theTab;
@@ -691,6 +709,9 @@ NSWindowDelegate,
 
 - (void)setSplitSelectionMode:(BOOL)mode excludingSession:(PTYSession *)session;
 
+- (IBAction)moveTabLeft:(id)sender;
+- (IBAction)moveTabRight:(id)sender;
+
 @end
 
 @interface PseudoTerminal (KeyValueCoding)
@@ -713,7 +734,13 @@ NSWindowDelegate,
 -(id)valueWithName: (NSString *)uniqueName inPropertyWithKey: (NSString*)propertyKey;
 -(id)valueWithID: (NSString *)uniqueID inPropertyWithKey: (NSString*)propertyKey;
 -(id)addNewSession:(NSDictionary *)addressbookEntry withURL: (NSString *)url;
--(id)addNewSession:(NSDictionary *) addressbookEntry withCommand: (NSString *)command asLoginSession:(BOOL)loginSession;
+-(id)addNewSession:(NSDictionary *)addressbookEntry
+           withURL:(NSString *)url
+     forObjectType:(iTermObjectType)objectType;
+-(id)addNewSession:(NSDictionary *) addressbookEntry
+       withCommand:(NSString *)command
+    asLoginSession:(BOOL)loginSession
+     forObjectType:(iTermObjectType)objectType;
 -(void)appendSession:(PTYSession *)object;
 -(void)removeFromSessionsAtIndex:(unsigned)index;
 -(NSArray*)sessions;
@@ -742,7 +769,9 @@ NSWindowDelegate,
 - (PTYSession*)newSessionWithBookmark:(Bookmark*)bookmark;
 
 // Execute the bookmark command in this session.
-- (void)runCommandInSession:(PTYSession*)aSession inCwd:(NSString*)oldCWD;
+- (void)runCommandInSession:(PTYSession*)aSession
+                      inCwd:(NSString*)oldCWD
+              forObjectType:(iTermObjectType)objectType;
 
 // For full screen mode, draw the window contents in black except for the find
 // bar area.
@@ -750,12 +779,6 @@ NSWindowDelegate,
 
 - (void)hideMenuBar;
 - (void)showMenuBar;
-
-// This is a half-baked function that tries to parse a command line into a
-// command (returned in *cmd) and an array of arguments (returned in *path).
-+ (void)breakDown:(NSString *)cmdl
-          cmdPath:(NSString **)cmd
-          cmdArgs:(NSArray **)path;
 
 // Returns the width of characters in pixels in the session with the widest
 // characters. Fills in *numChars with the number of columns in that session.
@@ -821,6 +844,8 @@ NSWindowDelegate,
 
 // Reutrn the name of the foreground session.
 - (NSString *)currentSessionName;
+
+- (CGFloat)fullscreenToolbeltWidth;
 
 // Set the session name. If theSessionName is nil then set it to the pathname
 // or "Finish" if it's closed.

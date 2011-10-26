@@ -299,8 +299,10 @@ typedef enum {
     int  CHARSET;           // G0...G3
     BOOL XON;               // YES=XON, NO=XOFF
     BOOL numLock;           // YES=ON, NO=OFF, default=YES;
+    BOOL shouldBounceDockIcon; // YES=Bounce, NO=cancel;
     MouseMode MOUSE_MODE;
     MouseFormat MOUSE_FORMAT;
+    BOOL REPORT_FOCUS;
 
     int FG_COLORCODE;
     BOOL alternateForegroundSemantics;
@@ -378,6 +380,7 @@ typedef enum {
 - (NSData *)keypadData: (unichar) unicode keystr: (NSString *) keystr;
 
 - (char *)mouseReport:(int)button atX:(int)x Y:(int)y;
+- (BOOL)reportFocus;
 - (NSData *)mousePress:(int)button withModifiers:(unsigned int)modflag atX:(int)x Y:(int)y;
 - (NSData *)mouseReleaseWithModifiers:(unsigned int)modflag atX:(int)x Y:(int)y;
 - (NSData *)mouseMotion:(int)button withModifiers:(unsigned int)modflag atX:(int)x Y:(int)y;

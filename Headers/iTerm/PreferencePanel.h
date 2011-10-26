@@ -28,6 +28,8 @@
 #import <iTerm/BookmarkModel.h>
 #import "BookmarkListView.h"
 #import "WindowArrangements.h"
+#import "TriggerController.h"
+#import "SmartSelectionController.h"
 
 #define OPT_NORMAL 0
 #define OPT_META   1
@@ -52,13 +54,19 @@
 #define PROMPT_EX_JOBS 2
 
 @class iTermController;
+@class TriggerController;
+@class SmartSelectionController;
+@class TrouterPrefsController;
 
 typedef enum { CURSOR_UNDERLINE, CURSOR_VERTICAL, CURSOR_BOX } ITermCursorType;
 
-@interface PreferencePanel : NSWindowController <BookmarkTableDelegate>
+@interface PreferencePanel : NSWindowController <BookmarkTableDelegate, TriggerDelegate, SmartSelectionDelegate>
 {
     BookmarkModel* dataSource;
     BOOL oneBookmarkMode;
+    IBOutlet TriggerController *triggerWindowController_;
+    IBOutlet SmartSelectionController *smartSelectionWindowController_;
+    IBOutlet TrouterPrefsController *trouterPrefController_;
 
     // This is actually the tab style. It takes one of these values:
     // 0: Metal
@@ -231,10 +239,14 @@ typedef enum { CURSOR_UNDERLINE, CURSOR_VERTICAL, CURSOR_BOX } ITermCursorType;
     IBOutlet NSButton *hideScrollbar;
     BOOL defaultHideScrollbar;
 
+    // show pane titles
+    IBOutlet NSButton *showPaneTitles;
+    BOOL defaultShowPaneTitles;
+
     // Disable transparency in fullscreen by default
     IBOutlet NSButton *disableFullscreenTransparency;
     BOOL defaultDisableFullscreenTransparency;
-    
+
     // smart window placement
     IBOutlet NSButton *smartPlacement;
     BOOL defaultSmartPlacement;
@@ -337,6 +349,16 @@ typedef enum { CURSOR_UNDERLINE, CURSOR_VERTICAL, CURSOR_BOX } ITermCursorType;
     IBOutlet NSTextField *bookmarkUrlSchemesHeaderLabel;
     IBOutlet NSTextField *bookmarkUrlSchemesLabel;
     IBOutlet NSPopUpButton* bookmarkUrlSchemes;
+    IBOutlet NSButton* editAdvancedConfigButton;
+
+    // Advanced working dir sheet
+    IBOutlet NSPanel* advancedWorkingDirSheet_;
+    IBOutlet NSMatrix* awdsWindowDirectoryType;
+    IBOutlet NSTextField* awdsWindowDirectory;
+    IBOutlet NSMatrix* awdsTabDirectoryType;
+    IBOutlet NSTextField* awdsTabDirectory;
+    IBOutlet NSMatrix* awdsPaneDirectoryType;
+    IBOutlet NSTextField* awdsPaneDirectory;
 
     // Only visible in Get Info mode
     IBOutlet NSButton* copyToProfileButton;
@@ -429,6 +451,7 @@ typedef enum { CURSOR_UNDERLINE, CURSOR_VERTICAL, CURSOR_BOX } ITermCursorType;
     IBOutlet NSButton* unlimitedScrollback;
     IBOutlet NSComboBox* terminalType;
     IBOutlet NSPopUpButton* characterEncoding;
+    IBOutlet NSButton* setLocaleVars;
 
     // Keyboard tab
     IBOutlet NSTableView* keyMappings;
@@ -476,6 +499,7 @@ typedef enum { CURSOR_UNDERLINE, CURSOR_VERTICAL, CURSOR_BOX } ITermCursorType;
     IBOutlet NSButton* copyWindow;
     IBOutlet NSButton* copyKeyboard;
     IBOutlet NSButton* copySession;
+    IBOutlet NSButton* copyAdvanced;
     IBOutlet BookmarkListView* copyTo;
     IBOutlet NSButton* copyButton;
 
@@ -515,20 +539,32 @@ typedef enum {
     BulkCopyWindow,
     BulkCopyTerminal,
     BulkCopyKeyboard,
-    BulkCopySession
+    BulkCopySession,
+    BulkCopyAdvanced,
 } BulkCopySettings;
 
 + (PreferencePanel*)sharedInstance;
 + (PreferencePanel*)sessionsInstance;
 + (BOOL)migratePreferences;
 + (BOOL)loadingPrefsFromCustomFolder;
+
 - (BOOL)loadPrefs;
 - (id)initWithDataSource:(BookmarkModel*)model userDefaults:(NSUserDefaults*)userDefaults;
-- (void)setOneBokmarkOnly;
+
+- (void)triggerChanged:(TriggerController *)triggerController;
+- (void)smartSelectionChanged:(SmartSelectionController *)smartSelectionController;
+
+- (void)setOneBookmarkOnly;
 - (void)awakeFromNib;
 - (void)handleWindowWillCloseNotification:(NSNotification *)notification;
 - (void)genericCloseSheet:(NSWindow *)sheet returnCode:(int)returnCode contextInfo:(void *)contextInfo;
 - (void)editKeyMapping:(id)sender;
+- (IBAction)showAdvancedWorkingDirConfigPanel:(id)sender;
+- (IBAction)closeAdvancedWorkingDirSheet:(id)sender;
+- (IBAction)editSmartSelection:(id)sender;
+- (IBAction)closeSmartSelectionSheet:(id)sender;
+- (IBAction)editTriggers:(id)sender;
+- (IBAction)closeTriggersSheet:(id)sender;
 - (IBAction)changeProfile:(id)sender;
 - (IBAction)addJob:(id)sender;
 - (IBAction)removeJob:(id)sender;
@@ -581,6 +617,7 @@ typedef enum {
 - (NSString *)wordChars;
 - (ITermCursorType)legacyCursorType;
 - (BOOL)hideScrollbar;
+- (BOOL)showPaneTitles;
 - (BOOL)disableFullscreenTransparency;
 - (BOOL)smartPlacement;
 - (BOOL)windowNumber;

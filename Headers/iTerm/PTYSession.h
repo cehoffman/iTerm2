@@ -31,6 +31,7 @@
 #import "WindowControllerInterface.h"
 #import "TextViewWrapper.h"
 #import "FindViewController.h"
+#import "ITAddressBookMgr.h"
 
 #include <sys/time.h>
 
@@ -217,6 +218,15 @@ typedef enum {
     // updated when this is set to nil.
     NSString *pasteboard_;
     NSMutableData *pbtext_;
+
+    // The current line of text, for checking against triggers if any.
+    NSMutableString *triggerLine_;
+
+    // The current triggers.
+    NSMutableArray *triggers_;
+
+    // Does the terminal think this session is focused?
+    BOOL focused_;
 }
 
 // Return the current pasteboard value as a string.
@@ -256,10 +266,19 @@ typedef enum {
 // Session specific methods
 - (BOOL)setScreenSize:(NSRect)aRect parent:(id<WindowControllerInterface>)parent;
 
-+ (void)drawArrangementPreview:(NSDictionary *)arrangement frame:(NSRect)frame;
-+ (PTYSession*)sessionFromArrangement:(NSDictionary*)arrangement inView:(SessionView*)sessionView inTab:(PTYTab*)theTab;
+// triggers
+- (void)clearTriggerLine;
+- (void)appendStringToTriggerLine:(NSString *)s;
 
-- (void)runCommandWithOldCwd:(NSString*)oldCWD;
++ (void)drawArrangementPreview:(NSDictionary *)arrangement frame:(NSRect)frame;
++ (PTYSession*)sessionFromArrangement:(NSDictionary*)arrangement
+                               inView:(SessionView*)sessionView
+                                inTab:(PTYTab*)theTab
+                        forObjectType:(iTermObjectType)objectType;
+
+
+- (void)runCommandWithOldCwd:(NSString*)oldCWD
+               forObjectType:(iTermObjectType)objectType;
 
 - (void)startProgram:(NSString *)program
            arguments:(NSArray *)prog_argv
@@ -484,6 +503,11 @@ typedef enum {
 - (NSImage *)dragImage;
 
 - (void)setPasteboard:(NSString *)pbName;
+- (BOOL)hasCoprocess;
+- (void)stopCoprocess;
+- (void)launchCoprocessWithCommand:(NSString *)command;
+
+- (void)setFocused:(BOOL)focused;
 
 @end
 

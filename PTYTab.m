@@ -133,6 +133,23 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     deadStateColor = [NSColor grayColor];
 }
 
+- (void)updatePaneTitles
+{
+    const BOOL showTitles = [[PreferencePanel sharedInstance] showPaneTitles];
+    NSArray *sessions = [self sessions];
+    for (PTYSession *aSession in sessions) {
+        if ([[aSession view] setShowTitle:showTitles && [sessions count] > 1]) {
+            [self fitSessionToCurrentViewSize:aSession];
+        }
+    }
+}
+
+- (void)numberOfSessionsDidChange
+{
+    [self updatePaneTitles];
+    [realParentWindow_ futureInvalidateRestorableState];
+}
+
 - (void)appendSessionViewToViewOrder:(SessionView*)sessionView
 {
     NSNumber* n = [NSNumber numberWithInt:[sessionView viewId]];
@@ -143,6 +160,7 @@ static const BOOL USE_THIN_SPLITTERS = YES;
         }
         [viewOrder_ insertObject:n atIndex:i];
     }
+    [self numberOfSessionsDidChange];
 }
 
 - (void)appendSessionToViewOrder:(PTYSession*)session
@@ -330,13 +348,22 @@ static const BOOL USE_THIN_SPLITTERS = YES;
     [self setLabelAttributes];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"iTermSessionBecameKey"
                                                         object:activeSession_];
-    
+    // If the active session changed in the active tab in the key window then update the
+    // focused state of all sessions in that window.
+    if ([[self realParentWindow] currentTab] == self &&
+        [[[self realParentWindow] window] isKeyWindow]) {
+      for (PTYSession *aSession in [[self realParentWindow] sessions]) {
+        [aSession setFocused:(aSession == session)];
+      }
+    }
+
     NSUInteger i = [viewOrder_ indexOfObject:[NSNumber numberWithInt:[[session view] viewId]]];
     if (i != NSNotFound) {
         currentViewIndex_ = i;
     }
 
     --preserveOrder_;
+    [realParentWindow_ futureInvalidateRestorableState];
 }
 
 - (void)setActiveSession:(PTYSession*)session
@@ -1063,9 +1090,10 @@ static NSString* FormatRect(NSRect r) {
     if (aSession == activeSession_) {
         [self setActiveSessionPreservingViewOrder:[(SessionView*)nearestNeighbor session]];
     }
-    
+
     [self recheckBlur];
     [realParentWindow_ sessionWasRemoved];
+    [self numberOfSessionsDidChange];
 }
 
 - (BOOL)canSplitVertically:(BOOL)isVertical withSize:(NSSize)newSessionSize
@@ -1790,29 +1818,36 @@ static NSString* FormatRect(NSRect r) {
     }
 }
 
-- (PTYSession*)_recursiveRestoreSessions:(NSDictionary*)arrangement atNode:(NSView*)view inTab:(PTYTab*)theTab
+- (PTYSession*)_recursiveRestoreSessions:(NSDictionary*)arrangement
+                                  atNode:(NSView*)view
+                                   inTab:(PTYTab*)theTab
+                           forObjectType:(iTermObjectType)objectType
 {
     if ([[arrangement objectForKey:TAB_ARRANGEMENT_VIEW_TYPE] isEqualToString:VIEW_TYPE_SPLITTER]) {
         assert([view isKindOfClass:[NSSplitView class]]);
         NSSplitView* splitter = (NSSplitView*)view;
         NSArray* subArrangements = [arrangement objectForKey:SUBVIEWS];
         PTYSession* active = nil;
+        iTermObjectType subObjectType = objectType;
         for (int i = 0; i < [subArrangements count]; ++i) {
             NSDictionary* subArrangement = [subArrangements objectAtIndex:i];
             PTYSession* session = [self _recursiveRestoreSessions:subArrangement
                                                            atNode:[[splitter subviews] objectAtIndex:i]
-                                                            inTab:theTab];
+                                                            inTab:theTab
+                                                    forObjectType:subObjectType];
             if (session) {
                 active = session;
             }
+            subObjectType = iTermPaneObject;
         }
         return active;
     } else {
         assert([view isKindOfClass:[SessionView class]]);
         SessionView* sessionView = (SessionView*)view;
         PTYSession* session = [PTYSession sessionFromArrangement:[arrangement objectForKey:TAB_ARRANGEMENT_SESSION]
-                                                                                    inView:(SessionView*)view
-                                                                                     inTab:theTab];
+                                                          inView:(SessionView*)view
+                                                           inTab:theTab
+                                                   forObjectType:objectType];
         [sessionView setSession:session];
         [self appendSessionToViewOrder:session];
         if ([[arrangement objectForKey:TAB_ARRANGEMENT_IS_ACTIVE] boolValue]) {
@@ -1845,11 +1880,18 @@ static NSString* FormatRect(NSRect r) {
     [newRoot release];
 
     [theTab setObjectCount:[term numberOfTabs] + 1];
-    
+
     // Instantiate sessions in the skeleton view tree.
+    iTermObjectType objectType;
+    if ([term numberOfTabs] == 0) {
+        objectType = iTermWindowObject;
+    } else {
+        objectType = iTermTabObject;
+    }
     [theTab setActiveSession:[theTab _recursiveRestoreSessions:[arrangement objectForKey:TAB_ARRANGEMENT_ROOT]
                                                         atNode:theTab->root_
-                                                         inTab:theTab]];
+                                                         inTab:theTab
+                                                 forObjectType:objectType]];
 
     // Add the existing tab, which is now fully populated, to the term.
     [term appendTab:theTab];
@@ -1860,6 +1902,8 @@ static NSString* FormatRect(NSRect r) {
         [[root objectForKey:TAB_ARRANGEMENT_IS_MAXIMIZED] boolValue]) {
         [theTab maximize];
     }
+
+    [theTab numberOfSessionsDidChange];
 }
 
 - (NSDictionary*)arrangementWithMap:(NSMutableDictionary*)idMap
@@ -1919,6 +1963,7 @@ static NSString* FormatRect(NSRect r) {
     [temp release];
 
     [[root_ window] makeFirstResponder:[activeSession_ TEXTVIEW]];
+    [realParentWindow_ futureInvalidateRestorableState];
 }
 
 - (void)unmaximize
@@ -1951,6 +1996,7 @@ static NSString* FormatRect(NSRect r) {
     isMaximized_ = NO;
 
     [[root_ window] makeFirstResponder:[activeSession_ TEXTVIEW]];
+    [realParentWindow_ futureInvalidateRestorableState];
 }
 
 - (BOOL)promptOnClose

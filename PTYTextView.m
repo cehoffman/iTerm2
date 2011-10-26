@@ -60,6 +60,8 @@ static const int MAX_WORKING_DIR_COUNT = 50;
 #import "iTerm/NSStringITerm.h"
 #import "MovePaneController.h"
 #import "FutureMethods.h"
+#import "SmartSelectionController.h"
+#import "ITAddressBookMgr.h"
 
 #include <sys/time.h>
 #include <math.h>
@@ -105,6 +107,7 @@ const int kDragPaneModifiers = (NSAlternateKeyMask | NSCommandKeyMask | NSShiftK
 static const int kDragThreshold = 3;
 static const double kBackgroundConsideredDarkThreshold = 0.5;
 static const int kBroadcastMargin = 4;
+static const int kCoprocessMargin = 4;
 // When drawing lines, we use this structure to represent a run of cells  of
 // the same font, color, and attributes.
 typedef enum {
@@ -151,6 +154,7 @@ static NSImage* bellImage;
 static NSImage* wrapToTopImage;
 static NSImage* wrapToBottomImage;
 static NSImage* broadcastInputImage;
+static NSImage* coprocessImage;
 
 static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     return (RED_COEFFICIENT * r) + (GREEN_COEFFICIENT * g) + (BLUE_COEFFICIENT * b);
@@ -241,6 +245,11 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
                                                     ofType:@"png"];
     broadcastInputImage = [[NSImage alloc] initWithContentsOfFile:broadcastInputFile];
     [broadcastInputImage setFlipped:YES];
+
+    NSString* coprocessFile = [bundle pathForResource:@"Coprocess"
+                                                    ofType:@"png"];
+    coprocessImage = [[NSImage alloc] initWithContentsOfFile:coprocessFile];
+    [coprocessImage setFlipped:YES];
 }
 
 - (BOOL)xtermMouseReporting
@@ -282,6 +291,11 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
         NSStringPboardType,
         nil]];
 
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(_useBackgroundIndicatorChanged:)
+                                                 name:kUseBackgroundPatternIndicatorChangedNotification
+                                               object:nil];
+    [self _useBackgroundIndicatorChanged:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(_settingsChanged:)
                                                  name:@"iTermRefreshTerminal"
@@ -330,9 +344,9 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 
 - (void)viewWillMoveToWindow:(NSWindow *)win
 {
-    if (!win && [self window] && trackingRectTag) {
-        [self removeTrackingRect:trackingRectTag];
-        trackingRectTag = 0;
+    if (!win && [self window] && trackingArea) {
+        [self removeTrackingArea:trackingArea];
+        trackingArea = nil;
     }
     [super viewWillMoveToWindow:win];
 }
@@ -340,19 +354,21 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 - (void)viewDidMoveToWindow
 {
     if ([self window]) {
-        if (trackingRectTag) {
-            [self removeTrackingRect:trackingRectTag];
+        if (trackingArea) {
+            [self removeTrackingArea:trackingArea];
         }
 
-        trackingRectTag = [self addTrackingRect:[self frame]
-                                          owner:self
-                                       userData:nil
-                                   assumeInside:NO];
+        trackingArea = [[[NSTrackingArea alloc] initWithRect:[self visibleRect]
+                                                     options:NSTrackingMouseEnteredAndExited | NSTrackingInVisibleRect | NSTrackingActiveAlways | NSTrackingEnabledDuringMouseDrag
+                                                       owner:self
+                                                    userInfo:nil] autorelease];
+        [self addTrackingArea:trackingArea];
     }
 }
 
 - (void)dealloc
 {
+    [smartSelectionRules_ release];
     int i;
 
     if (mouseDownEvent != nil) {
@@ -360,8 +376,8 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
         mouseDownEvent = nil;
     }
 
-    if (trackingRectTag) {
-        [self removeTrackingRect:trackingRectTag];
+    if (trackingArea) {
+        [self removeTrackingArea:trackingArea];
     }
 
     [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -491,12 +507,22 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
     return endY;
 }
 
+- (void)setSelectionTime
+{
+    if (startX < 0 || (startX == endX && startY == endY)) {
+        selectionTime_ = 0;
+    } else {
+        selectionTime_ = [[NSDate date] timeIntervalSince1970];
+    }
+}
+
 - (void)setSelectionFromX:(int)fromX fromY:(int)fromY toX:(int)toX toY:(int)toY
 {
     startX = fromX;
     startY = fromY;
     endX = toX;
     endY = toY;
+    [self setSelectionTime];
 }
 
 - (void)setFGColor:(NSColor*)color
@@ -871,13 +897,6 @@ NSMutableArray* screens=0;
 
     frameSize.height += VMARGIN;  // This causes a margin to be left at the top
     [[self superview] setFrameSize:frameSize];
-}
-
-static BOOL RectsEqual(NSRect* a, NSRect* b) {
-        return a->origin.x == b->origin.x &&
-               a->origin.y == b->origin.y &&
-               a->size.width == b->size.width &&
-               a->size.height == b->size.height;
 }
 
 - (void)scheduleSelectionScroll
@@ -1257,7 +1276,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
     } else if ([attribute isEqualToString:NSAccessibilityNumberOfCharactersAttribute]) {
         return [NSNumber numberWithInt:[[self _allText] length]];
     } else if ([attribute isEqualToString:NSAccessibilitySelectedTextAttribute]) {
-        return @"";
+        return [self selectedText];
     } else if ([attribute isEqualToString:NSAccessibilitySelectedTextRangeAttribute]) {
         int x = [dataSource cursorX] - 1;
         int y = [dataSource numberOfLines] - [dataSource height] + [dataSource cursorY] - 1;
@@ -1331,18 +1350,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
         return YES;
     }
 
-    // reset tracking rect
-    NSRect visibleRect = [self visibleRect];
-    if (!trackingRectTag || !RectsEqual(&visibleRect, &_trackingRect)) {
-        if (trackingRectTag) {
-            [self removeTrackingRect:trackingRectTag];
-        }
-        // This call is very slow.
-        trackingRectTag = [self addTrackingRect:visibleRect owner:self userData:nil assumeInside:NO];
-        _trackingRect = visibleRect;
-    }
-
-    // number of lines that have disappeared if circular buffer is full
+    // number of lines that have disappeared if scrollback buffer is full
     int scrollbackOverflow = [dataSource scrollbackOverflow];
     [dataSource resetScrollbackOverflow];
 
@@ -1384,6 +1392,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
         startY -= scrollbackOverflow;
         if (startY < 0) {
             startX = -1;
+            [self setSelectionTime];
         }
         endY -= scrollbackOverflow;
         oldStartY -= scrollbackOverflow;
@@ -1567,19 +1576,29 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
 - (void)drawRect:(NSRect)rect
 {
     [self drawRect:rect to:nil];
-
+    const NSRect frame = [self visibleRect];
+    double x = frame.origin.x + frame.size.width;
     if ([[[[dataSource session] tab] realParentWindow] broadcastInputToSession:[dataSource session]]) {
-        NSRect frame = [self visibleRect];
         NSSize size = [broadcastInputImage size];
-        [broadcastInputImage drawAtPoint:NSMakePoint(frame.origin.x + frame.size.width - size.width - kBroadcastMargin,
+        x -= size.width + kBroadcastMargin;
+        [broadcastInputImage drawAtPoint:NSMakePoint(x,
                                                      frame.origin.y + kBroadcastMargin)
                                 fromRect:NSMakeRect(0, 0, size.width, size.height)
                                operation:NSCompositeSourceOver
                                 fraction:0.5];
     }
 
+    if ([[[dataSource session] SHELL] hasCoprocess]) {
+        NSSize size = [coprocessImage size];
+        x -= size.width + kCoprocessMargin;
+        [coprocessImage drawAtPoint:NSMakePoint(x,
+                                                     frame.origin.y + kCoprocessMargin)
+                                fromRect:NSMakeRect(0, 0, size.width, size.height)
+                               operation:NSCompositeSourceOver
+                                fraction:0.5];
+    }
+
     if (flashing_ > 0) {
-        NSRect frame = [self visibleRect];
         NSImage* image = nil;
         switch (flashImage_) {
             case FlashBell:
@@ -1950,52 +1969,27 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
                                   targetOffset:&targetOffset
                                         coords:coords];
 
-    const double LOW_PRECISION = 0.001;
-    const double NORMAL_PRECISION = 1.0;
-    const double HIGH_PRECISION = 1000.0;
-    const double VERY_HIGH_PRECISION = 1000000.0;
-
-    typedef struct {
-        NSString* regex;
-        double precision;
-    } SmartMatchRule;
-    static SmartMatchRule* rules = nil;
-    static int numRules = 0;
-    if (!rules) {
-        NSString* plistFile = [[NSBundle bundleForClass:[self class]] pathForResource:@"SmartSelectionRules"
-                                                                               ofType:@"plist"];
-        NSDictionary* rulesDict = [NSDictionary dictionaryWithContentsOfFile:plistFile];
-        NSArray* rulesArray = [rulesDict objectForKey:@"Rules"];
-        rules = malloc(sizeof(SmartMatchRule) * [rulesArray count]);
-        int i = 0;
-        for (NSDictionary* dict in rulesArray) {
-            rules[i].regex = [[dict objectForKey:@"regex"] retain];
-            NSString* precision = [dict objectForKey:@"precision"];
-            if ([precision isEqualToString:@"low"]) {
-                rules[i].precision = LOW_PRECISION;
-            } else if ([precision isEqualToString:@"normal"]) {
-                rules[i].precision = NORMAL_PRECISION;
-            } else if ([precision isEqualToString:@"high"]) {
-                rules[i].precision = HIGH_PRECISION;
-            } else if ([precision isEqualToString:@"very_high"]) {
-                rules[i].precision = VERY_HIGH_PRECISION;
-            }
-            i++;
-        }
-        numRules = [rulesArray count];
-        //NSLog(@"Loaded %d smart selection rules", numRules);
-    }
+    NSArray* rulesArray = smartSelectionRules_ ? smartSelectionRules_ : [SmartSelectionController defaultRules];
+    const int numRules = [rulesArray count];
 
     NSMutableDictionary* matches = [NSMutableDictionary dictionaryWithCapacity:13];
     int numCoords = [coords count];
 
-    //NSLog(@"Searching for %@", textWindow);
+    BOOL debug = [SmartSelectionController logDebugInfo];
+    if (debug) {
+        NSLog(@"Perform smart selection on text: %@", textWindow);
+    }
     for (int j = 0; j < numRules; j++) {
-        //NSLog(@"Try regex %@", rules[j].regex);
+        NSDictionary *rule = [rulesArray objectAtIndex:j];
+        NSString *regex = [SmartSelectionController regexInRule:rule];
+        double precision = [SmartSelectionController precisionInRule:rule];
+        if (debug) {
+            NSLog(@"Try regex %@", regex);
+        }
         for (int i = 0; i <= targetOffset; i++) {
             NSString* substring = [textWindow substringWithRange:NSMakeRange(i, [textWindow length] - i)];
             NSError* regexError = nil;
-            NSRange temp = [substring rangeOfRegex:rules[j].regex
+            NSRange temp = [substring rangeOfRegex:regex
                                            options:0
                                            inRange:NSMakeRange(0, [substring length])
                                            capture:0
@@ -2003,7 +1997,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
             if (temp.location != NSNotFound) {
                 if (i + temp.location <= targetOffset && i + temp.location + temp.length > targetOffset) {
                     NSString* result = [substring substringWithRange:temp];
-                    double score = rules[j].precision * (double) temp.length;
+                    double score = precision * (double) temp.length;
                     SmartMatch* oldMatch = [matches objectForKey:result];
                     if (!oldMatch || score > oldMatch->score) {
                         SmartMatch* match = [[[SmartMatch alloc] init] autorelease];
@@ -2016,7 +2010,9 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
                         match->absEndY = endCoord->y + [dataSource totalScrollbackOverflow];
                         [matches setObject:match forKey:result];
 
-                        //NSLog(@"Add result %@ at %d,%lld -> %d,%lld with score %lf", result, match->startX, match->absStartY, match->endX, match->absEndY, match->score);
+                        if (debug) {
+                            NSLog(@"Add result %@ at %d,%lld -> %d,%lld with score %lf", result, match->startX, match->absStartY, match->endX, match->absEndY, match->score);
+                        }
                     }
                     i += temp.location + temp.length - 1;
                 } else {
@@ -2031,12 +2027,18 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
     if ([matches count]) {
         NSArray* sortedMatches = [[[matches allValues] sortedArrayUsingSelector:@selector(compare:)] retain];
         SmartMatch* bestMatch = [sortedMatches lastObject];
+        if (debug) {
+            NSLog(@"Select match with score %lf", bestMatch->score);
+        }
         *X1 = bestMatch->startX;
         *Y1 = bestMatch->absStartY - [dataSource totalScrollbackOverflow];
         *X2 = bestMatch->endX;
         *Y2 = bestMatch->absEndY - [dataSource totalScrollbackOverflow];
         return YES;
     } else {
+        if (debug) {
+            NSLog(@"No matches. Fall back on word selection.");
+        }
         // Fall back on word selection
         [self getWordForX:x
                         y:y
@@ -2713,6 +2715,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
                 // Clicked before the start. Move the start to the old end.
                 startX = endX;
                 startY = endY;
+                [self setSelectionTime];
             }
             // Move the end to the click location.
             endX = x;
@@ -2728,6 +2731,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
             // start a new selection
             endX = startX = x;
             endY = startY = y;
+            [self setSelectionTime];
         }
     } else if (clickCount == 2) {
         int tmpX1, tmpY1, tmpX2, tmpY2;
@@ -2755,6 +2759,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
                 startY = endY;
                 endX = tmpX1;
                 endY = tmpY1;
+                [self setSelectionTime];
             }
         } else  {
             // no matching paren and not holding shift. Set selection to word boundary.
@@ -2762,6 +2767,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
             startY = tmpY1;
             endX = tmpX2;
             endY = tmpY2;
+            [self setSelectionTime];
         }
     } else if (clickCount == 3) {
         // triple-click; select line
@@ -2778,6 +2784,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
                     // advance start to end
                     startX = endX;
                     startY = endY;
+                    [self setSelectionTime];
                 }
                 endX = 0;
                 endY = y;
@@ -2787,6 +2794,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
             startX = 0;
             endX = width;
             startY = endY = y;
+            [self setSelectionTime];
         }
     } else if (clickCount == 4) {
         // quad-click: smart selection
@@ -2806,7 +2814,7 @@ static BOOL RectsEqual(NSRect* a, NSRect* b) {
 
     DebugLog([NSString stringWithFormat:@"Mouse down. startx=%d starty=%d, endx=%d, endy=%d", startX, startY, endX, endY]);
     if([_delegate respondsToSelector: @selector(willHandleEvent:)] && [_delegate willHandleEvent: event])
-        [_delegate handleEvent: event];
+        [_delegate handleEvent:event];
     [[[self dataSource] session] refreshAndStartTimerIfNeeded];
 
     return NO;
@@ -2912,6 +2920,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         int t;
         t = startY; startY = endY; endY = t;
         t = startX; startX = endX; endX = t;
+        [self setSelectionTime];
     } else if ([event clickCount] < 2 &&
                !mouseDragged &&
                !([event modifierFlags] & NSShiftKeyMask)) {
@@ -2922,21 +2931,11 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             // Command click in place.
             NSString *url = [self _getURLForX:x y:y];
 
-            if (url && ([event modifierFlags] & NSShiftKeyMask)) {
-                // Cmd-shift click executes an alternate semantic history action.
-                NSString *fullPath = [trouter getFullPath:url
-                                         workingDirectory:[self getWorkingDirectoryAtLine:y + 1]
-                                               lineNumber:nil];
-                if ([trouter isDirectory:fullPath]) {
-                    [self _changeDirectory:fullPath];
-                }
-            } else {
-                int mods = [event modifierFlags];
-                BOOL altPressed = (mods & NSAlternateKeyMask) != 0;
-                [self _openURL:url
-                          atLine:y + 1
-                          inBackground:altPressed];
-            }
+            int mods = [event modifierFlags];
+            BOOL altPressed = (mods & NSAlternateKeyMask) != 0;
+            [self _openURL:url
+                      atLine:y + 1
+                      inBackground:altPressed];
         } else {
             lastFindStartX = endX;
             lastFindEndX = endX+1;
@@ -3238,6 +3237,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     startX = startY = 0;
     endX = [dataSource width];
     endY = [dataSource numberOfLines] - 1;
+    [self setSelectionTime];
     [[[self dataSource] session] refreshAndStartTimerIfNeeded];
 }
 
@@ -3245,6 +3245,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 {
     if (startX > -1) {
         startX = -1;
+        [self setSelectionTime];
         [[[self dataSource] session] refreshAndStartTimerIfNeeded];
     }
 }
@@ -3355,10 +3356,21 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     }
 }
 
+- (NSTimeInterval)selectionTime
+{
+    return selectionTime_;
+}
+
 - (void)pasteSelection:(id)sender
 {
-    if (startX > -1 && [_delegate respondsToSelector:@selector(pasteString:)]) {
-        [_delegate pasteString:[self selectedText]];
+    if ([_delegate respondsToSelector:@selector(pasteString:)]) {
+        PTYSession *session = [[iTermController sharedInstance] sessionWithMostRecentSelection];
+        if (session) {
+            PTYTextView *textview = [session TEXTVIEW];
+            if (textview->startX > -1) {
+                [_delegate pasteString:[textview selectedText]];
+            }
+        }
     }
 }
 
@@ -3414,29 +3426,32 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
 - (BOOL)_haveShortSelection
 {
-    return startX > -1 && abs(startY - endY) <= 1;
+    return startX > -1 && startY >= 0 && abs(startY - endY) <= 1;
 }
 
 - (NSMenu *)menuForEvent:(NSEvent *)theEvent
 {
-    PTYTextView* frontTextView = [[iTermController sharedInstance] frontTextView];
-    NSRect visibleRect = [[self enclosingScrollView] documentVisibleRect];
-    NSPoint locationInWindow = [theEvent locationInWindow];
-    NSPoint locationInTextView = [self convertPoint:locationInWindow fromView:nil];
-    VT100Terminal *terminal = [dataSource terminal];
-    MouseMode mm = [terminal mouseMode];
-    if (frontTextView == self &&
-        ([self xtermMouseReporting]) &&
-        (mm == MOUSE_REPORTING_NORMAL ||
-         mm == MOUSE_REPORTING_BUTTON_MOTION ||
-         mm == MOUSE_REPORTING_ALL_MOTION) &&
-        (locationInTextView.y > visibleRect.origin.y) &&
-        [[frontTextView->dataSource session] tab] == [[dataSource session] tab] &&
-        [theEvent type] == NSLeftMouseDown &&
-        ([theEvent modifierFlags] & NSControlKeyMask) &&
-        [[PreferencePanel sharedInstance] passOnControlLeftClick]) {
-        // All the many conditions are met for having the click passed on via xterm mouse reporting.
-        return nil;
+    if (theEvent) {
+        // Not for "synthetic" events, as the session title view sends.
+        PTYTextView* frontTextView = [[iTermController sharedInstance] frontTextView];
+        NSRect visibleRect = [[self enclosingScrollView] documentVisibleRect];
+        NSPoint locationInWindow = [theEvent locationInWindow];
+        NSPoint locationInTextView = [self convertPoint:locationInWindow fromView:nil];
+        VT100Terminal *terminal = [dataSource terminal];
+        MouseMode mm = [terminal mouseMode];
+        if (frontTextView == self &&
+            ([self xtermMouseReporting]) &&
+            (mm == MOUSE_REPORTING_NORMAL ||
+             mm == MOUSE_REPORTING_BUTTON_MOTION ||
+             mm == MOUSE_REPORTING_ALL_MOTION) &&
+            (locationInTextView.y > visibleRect.origin.y) &&
+            [[frontTextView->dataSource session] tab] == [[dataSource session] tab] &&
+            [theEvent type] == NSLeftMouseDown &&
+            ([theEvent modifierFlags] & NSControlKeyMask) &&
+            [[PreferencePanel sharedInstance] passOnControlLeftClick]) {
+            // All the many conditions are met for having the click passed on via xterm mouse reporting.
+            return nil;
+        }
     }
     NSMenu *theMenu;
 
@@ -3478,18 +3493,24 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     // Menu items for acting on text selections
     [theMenu addItemWithTitle:NSLocalizedStringFromTableInBundle(@"Open Selection as URL",@"iTerm", [NSBundle bundleForClass: [self class]], @"Context menu")
                      action:@selector(browse:) keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
     [theMenu addItemWithTitle:NSLocalizedStringFromTableInBundle(@"Search Google for Selection",@"iTerm", [NSBundle bundleForClass: [self class]], @"Context menu")
                      action:@selector(searchInBrowser:) keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
     [theMenu addItemWithTitle:NSLocalizedStringFromTableInBundle(@"Send Email to Selected Address",@"iTerm", [NSBundle bundleForClass: [self class]], @"Context menu")
                      action:@selector(mail:) keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
 
     // Separator
     [theMenu addItem:[NSMenuItem separatorItem]];
 
     // Split pane options
     [theMenu addItemWithTitle:@"Split Pane Vertically" action:@selector(splitTextViewVertically:) keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
     [theMenu addItemWithTitle:@"Split Pane Horizontally" action:@selector(splitTextViewHorizontally:) keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
     [theMenu addItemWithTitle:@"Move Session to Split Pane" action:@selector(movePane:) keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
 
     // Separator
     [theMenu addItem:[NSMenuItem separatorItem]];
@@ -3497,10 +3518,13 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     // Copy,  paste, and save
     [theMenu addItemWithTitle:NSLocalizedStringFromTableInBundle(@"Copy",@"iTerm", [NSBundle bundleForClass: [self class]], @"Context menu")
                      action:@selector(copy:) keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
     [theMenu addItemWithTitle:NSLocalizedStringFromTableInBundle(@"Paste",@"iTerm", [NSBundle bundleForClass: [self class]], @"Context menu")
                      action:@selector(paste:) keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
     [theMenu addItemWithTitle:NSLocalizedStringFromTableInBundle(@"Save",@"iTerm", [NSBundle bundleForClass: [self class]], @"Context menu")
                      action:@selector(saveDocumentAs:) keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
 
     // Separator
     [theMenu addItem:[NSMenuItem separatorItem]];
@@ -3508,11 +3532,13 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     // Select all
     [theMenu addItemWithTitle:NSLocalizedStringFromTableInBundle(@"Select All",@"iTerm", [NSBundle bundleForClass: [self class]], @"Context menu")
                      action:@selector(selectAll:) keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
 
     // Clear buffer
     [theMenu addItemWithTitle:@"Clear Buffer"
                        action:@selector(clearTextViewBuffer:)
                 keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
 
     // Separator
     [theMenu addItem:[NSMenuItem separatorItem]];
@@ -3521,6 +3547,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [theMenu addItemWithTitle:@"Edit Session..."
                        action:@selector(editTextViewSession:)
                 keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
 
     // Separator
     [theMenu addItem:[NSMenuItem separatorItem]];
@@ -3529,6 +3556,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [theMenu addItemWithTitle:@"Toggle Broadcasting Input"
                        action:@selector(toggleBroadcastingInput:)
                 keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
 
     // Separator
     [theMenu addItem:[NSMenuItem separatorItem]];
@@ -3537,10 +3565,12 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [theMenu addItemWithTitle:@"Close"
                        action:@selector(closeTextViewSession:)
                 keyEquivalent:@""];
+    [[theMenu itemAtIndex:[theMenu numberOfItems] - 1] setTarget:self];
 
     // Ask the delegae if there is anything to be added
-    if ([[self delegate] respondsToSelector:@selector(menuForEvent: menu:)])
-        [[self delegate] menuForEvent:theEvent menu: theMenu];
+    if ([[self delegate] respondsToSelector:@selector(menuForEvent: menu:)]) {
+        [[self delegate] menuForEvent:theEvent menu:theMenu];
+    }
 
     return [theMenu autorelease];
 }
@@ -3997,6 +4027,17 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     return _findInProgress || searchingForNextResult_;
 }
 
+- (void)setTrouterPrefs:(NSDictionary *)prefs
+{
+    trouter.prefs = prefs;
+}
+
+- (void)setSmartSelectionRules:(NSArray *)rules
+{
+    [smartSelectionRules_ autorelease];
+    smartSelectionRules_ = [rules copy];
+}
+
 - (BOOL)growSelectionLeft
 {
     if (startX == -1) {
@@ -4032,6 +4073,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 
     startX = tmpX1;
     startY = tmpY1;
+    [self setSelectionTime];
     [[[self dataSource] session] refreshAndStartTimerIfNeeded];
     return YES;
 }
@@ -4152,6 +4194,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
                 startY = r->absStartY - overflowAdustment;
                 endX = r->endX;
                 endY = r->absEndY - overflowAdustment;
+                [self setSelectionTime];
         }
         i += stride;
     }
@@ -4164,6 +4207,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
         startY = r->absStartY - overflowAdustment;
         endX = r->endX;
         endY = r->absEndY - overflowAdustment;
+        [self setSelectionTime];
         if (forward) {
             [self beginFlash:FlashWrapToTop];
         } else {
@@ -4188,6 +4232,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     if (!_findInProgress && !foundResult_) {
         // Clear the selection.
         startX = startY = endX = endY = -1;
+        [self setSelectionTime];
         absLastFindStartY = absLastFindEndY = -1;
         redraw = YES;
     }
@@ -4732,6 +4777,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     // Save to startx, starty.
     if (startx) {
         *startx = tmpX;
+        [self setSelectionTime];
     }
     if (starty) {
         *starty = tmpY;
@@ -5528,12 +5574,42 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     [self _drawRuns:initialPoint runs:runs numRuns:numRuns];
 }
 
+- (void)_drawStripesInRect:(NSRect)rect
+{
+    [NSGraphicsContext saveGraphicsState];
+    NSRectClip(rect);
+    [[NSGraphicsContext currentContext] setCompositingOperation:NSCompositeSourceOver];
+
+    const CGFloat kStripeWidth = 40;
+    const double kSlope = 1;
+
+    for (CGFloat x = kSlope * -fmod(rect.origin.y, kStripeWidth * 2) -2 * kStripeWidth ;
+         x < rect.origin.x + rect.size.width;
+         x += kStripeWidth * 2) {
+        if (x + 2 * kStripeWidth + rect.size.height * kSlope < rect.origin.x) {
+            continue;
+        }
+        NSBezierPath* thePath = [NSBezierPath bezierPath];
+
+        [thePath moveToPoint:NSMakePoint(x, rect.origin.y + rect.size.height)];
+        [thePath lineToPoint:NSMakePoint(x + kSlope * rect.size.height, rect.origin.y)];
+        [thePath lineToPoint:NSMakePoint(x + kSlope * rect.size.height + kStripeWidth, rect.origin.y)];
+        [thePath lineToPoint:NSMakePoint(x + kStripeWidth, rect.origin.y + rect.size.height)];
+        [thePath closePath];
+
+        [[[NSColor redColor] colorWithAlphaComponent:0.15] set];
+        [thePath fill];
+    }
+    [NSGraphicsContext restoreGraphicsState];
+}
+
 - (BOOL)_drawLine:(int)line AtY:(double)curY toPoint:(NSPoint*)toPoint
 {
     BOOL anyBlinking = NO;
     int screenstartline = [self frame].origin.y / lineHeight;
     DebugLog([NSString stringWithFormat:@"Draw line %d (%d on screen)", line, (line - screenstartline)]);
-
+    const BOOL stripes = useBackgroundIndicator_ &&
+        [[[[dataSource session] tab] realParentWindow] broadcastInputToSession:[dataSource session]];
     int WIDTH = [dataSource width];
     screen_char_t* theLine = [dataSource getLineAtIndex:line];
     PTYScrollView* scrollView = (PTYScrollView*)[self enclosingScrollView];
@@ -5731,6 +5807,10 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             }
 
             // Draw red stripes in the background if sending input to all sessions
+            if (stripes) {
+                [self _drawStripesInRect:bgRect];
+            }
+
             NSPoint textOrigin;
             if (toPoint) {
                 textOrigin = NSMakePoint(toPoint->x + MARGIN + bgstart * charWidth,
@@ -6351,6 +6431,12 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     oldCursorY = yStart;
 }
 
+- (void)_useBackgroundIndicatorChanged:(NSNotification *)notification
+{
+    useBackgroundIndicator_ = [(iTermApplicationDelegate *)[[NSApplication sharedApplication] delegate] useBackgroundPatternIndicator];
+    [self setNeedsDisplay:YES];
+}
+
 - (void)_scrollToLine:(int)line
 {
     NSRect aFrame;
@@ -6709,14 +6795,9 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
 - (NSString *)_getURLForX:(int)x
                         y:(int)y
 {
-    NSString* urlIgnoringHardEOL = [self _getURLForX:x y:y respectingHardNewlines:NO];
-    NSString* urlRespectingHardEOL = [self _getURLForX:x y:y respectingHardNewlines:YES];
-    if (![self _stringLooksLikeURL:urlRespectingHardEOL] &&
-        [self _stringLooksLikeURL:urlIgnoringHardEOL]) {
-        return urlIgnoringHardEOL;
-    } else {
-        return urlRespectingHardEOL;
-    }
+    // I tried respecting hard newlines if that is a legal URL, but that's such a broad definition
+    // that it doesn't work well. Hard EOLs mid-url are very common. Let's try always ignoring them.
+    return [self _getURLForX:x y:y respectingHardNewlines:NO];
 }
 
 - (BOOL) _findMatchingParenthesis: (NSString *) parenthesis withX:(int)X Y:(int)Y
@@ -6787,6 +6868,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             startY = yStart;
             endX = X+1;
             endY = Y;
+            [self setSelectionTime];
 
             return YES;
         } else {
@@ -6821,6 +6903,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             startY = Y;
             endX = x1+1;
             endY = yStart;
+            [self setSelectionTime];
 
             return YES;
         } else {
@@ -6849,7 +6932,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     return iResult;
 }
 
-- (BOOL)_lineLength:(int)y
+- (int)_lineLength:(int)y
 {
     screen_char_t *theLine = [dataSource getLineAtIndex:y];
     int x;
@@ -6922,12 +7005,6 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     }
 
     return [[workingDirectoryAtLines lastObject] lastObject];
-}
-
-- (void)_changeDirectory:(NSString *)path
-{
-    // TODO: Make this more efficient by calculating the shortest path to target folder
-    [[dataSource shellTask] writeTask:[[NSString stringWithFormat:@"\3cd \"%@\"; ls\n", path] dataUsingEncoding:[[dataSource session] encoding]]];
 }
 
 - (void)_openURL:(NSString *)aURLString atLine:(long long)line inBackground:(BOOL)background
@@ -7018,9 +7095,11 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     Bookmark *bm = [[PreferencePanel sharedInstance] handlerBookmarkForURL:[url scheme]];
 
     if (bm != nil)  {
+        PseudoTerminal *term = [[iTermController sharedInstance] currentTerminal];
         [[iTermController sharedInstance] launchBookmark:bm
-                                              inTerminal:[[iTermController sharedInstance] currentTerminal]
-                                                 withURL:trimmedURLString];
+                                              inTerminal:term
+                                                 withURL:trimmedURLString
+                                           forObjectType:term ? iTermTabObject : iTermWindowObject];
     } else {
         [self openURL:url inBackground:background];
     }
@@ -7506,6 +7585,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
     }
 
     DebugLog([NSString stringWithFormat:@"Mouse drag. startx=%d starty=%d, endx=%d, endy=%d", startX, startY, endX, endY]);
+    [self setSelectionTime];
     [[[self dataSource] session] refreshAndStartTimerIfNeeded];
 }
 
@@ -7527,6 +7607,7 @@ static double EuclideanDistance(NSPoint p1, NSPoint p2) {
             if ([dataSource isDirtyAtX:x Y:y-lineStart] && isSelected && !isCursor) {
                 // Don't call [self deselect] as it would recurse back here
                 startX = -1;
+                [self setSelectionTime];
                 DebugLog(@"found selected dirty noncursor");
                 break;
             }

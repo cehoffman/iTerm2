@@ -154,7 +154,7 @@ typedef struct PTYFontInfo PTYFontInfo;
     BOOL blinkAllowed_;
 
     // trackingRect tab
-    NSTrackingRectTag trackingRectTag;
+    NSTrackingArea *trackingArea;
 
     BOOL keyIsARepeat;
 
@@ -289,6 +289,15 @@ typedef struct PTYFontInfo PTYFontInfo;
 
     // Is the mouse inside our view?
     BOOL mouseInRect_;
+
+    // Time the selection last changed at or 0 if there's no selection.
+    NSTimeInterval selectionTime_;
+
+    // Dictionaries with a regex and a priority.
+    NSArray *smartSelectionRules_;
+
+    // Show a background indicator when in broadcast input mode
+    BOOL useBackgroundIndicator_;
 }
 
 + (NSCursor *)textViewCursor;
@@ -339,11 +348,15 @@ typedef struct PTYFontInfo PTYFontInfo;
 - (void)browse:(id)sender;
 - (void)searchInBrowser:(id)sender;
 - (void)mail:(id)sender;
+- (NSTimeInterval)selectionTime;
 // Cause the next find to start at the top/bottom of the buffer
 - (void)resetFindCursor;
 
 - (BOOL)growSelectionLeft;
 - (void)growSelectionRight;
+
+- (void)setTrouterPrefs:(NSDictionary *)prefs;
+- (void)setSmartSelectionRules:(NSArray *)rules;
 
 //get/set methods
 - (NSFont *)font;
@@ -539,6 +552,7 @@ typedef enum {
 - (unsigned int) _checkForSupportedDragTypes:(id <NSDraggingInfo>) sender;
 
 - (void) _scrollToLine:(int)line;
+- (void)_useBackgroundIndicatorChanged:(NSNotification *)notification;
 - (void)_scrollToCenterLine:(int)line;
 - (BOOL)shouldSelectCharForWord:(unichar)ch
                       isComplex:(BOOL)compled
@@ -569,9 +583,6 @@ typedef enum {
 - (void)logWorkingDirectoryAtLine:(long long)line;
 - (void)logWorkingDirectoryAtLine:(long long)line withDirectory:(NSString *)workingDirectory;
 - (NSString *)getWorkingDirectoryAtLine:(long long)line;
-
-// Trouter change directory
-- (void)_changeDirectory:(NSString *)path;
 
 - (BOOL)_findMatchingParenthesis:(NSString *)parenthesis withX:(int)X Y:(int)Y;
 - (void)_dragText:(NSString *)aString forEvent:(NSEvent *)theEvent;

@@ -33,9 +33,11 @@
 #import "SplitSelectionView.h"
 #import "MovePaneController.h"
 #import "PSMTabDragAssistant.h"
+#import "SessionTitleView.h"
 
 static const float kTargetFrameRate = 1.0/60.0;
 static int nextViewId;
+static const double kTitleHeight = 22;
 
 // Last time any window was resized TODO(georgen):it would be better to track per window.
 static NSDate* lastResizeDate_;
@@ -51,6 +53,18 @@ static NSDate* lastResizeDate_;
 {
     [lastResizeDate_ release];
     lastResizeDate_ = [[NSDate date] retain];
+}
+
+- (void)markUpdateTime
+{
+    [previousUpdate_ release];
+    previousUpdate_ = [[NSDate date] retain];
+}
+
+- (void)clearUpdateTime
+{
+    [previousUpdate_ release];
+    previousUpdate_ = nil;
 }
 
 - (void)_initCommon
@@ -81,7 +95,7 @@ static NSDate* lastResizeDate_;
     self = [self initWithFrame:frame];
     if (self) {
         [self _initCommon];
-        session_ = [session retain];
+        [self setSession:session];
     }
     return self;
 }
@@ -101,6 +115,8 @@ static NSDate* lastResizeDate_;
 
 - (void)dealloc
 {
+    [previousUpdate_ release];
+    [title_ removeFromSuperview];
     [self unregisterDraggedTypes];
     [session_ release];
     [super dealloc];
@@ -123,7 +139,7 @@ static NSDate* lastResizeDate_;
     timer_ = nil;
     float elapsed = [[NSDate date] timeIntervalSinceDate:previousUpdate_];
     float newDimmingAmount = currentDimmingAmount_ + elapsed * changePerSecond_;
-    [previousUpdate_ release];
+    [self clearUpdateTime];
     if ((changePerSecond_ > 0 && newDimmingAmount > targetDimmingAmount_) ||
         (changePerSecond_ < 0 && newDimmingAmount < targetDimmingAmount_)) {
         currentDimmingAmount_ = targetDimmingAmount_;
@@ -131,7 +147,7 @@ static NSDate* lastResizeDate_;
     } else {
         [[session_ TEXTVIEW] setDimmingAmount:newDimmingAmount];
         currentDimmingAmount_ = newDimmingAmount;
-        previousUpdate_ = [[NSDate date] retain];
+        [self markUpdateTime];
         timer_ = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
                                                   target:self
                                                 selector:@selector(fadeAnimation)
@@ -143,7 +159,7 @@ static NSDate* lastResizeDate_;
 - (void)_dimShadeToDimmingAmount:(float)newDimmingAmount
 {
     targetDimmingAmount_ = newDimmingAmount;
-    previousUpdate_ = [[NSDate date] retain];
+    [self markUpdateTime];
     const double kAnimationDuration = 0.1;
     if ([[PreferencePanel sharedInstance] animateDimming]) {
         changePerSecond_ = (targetDimmingAmount_ - currentDimmingAmount_) / kAnimationDuration;
@@ -190,6 +206,7 @@ static NSDate* lastResizeDate_;
     double amount = [self adjustedDimmingAmount];
 
     [self _dimShadeToDimmingAmount:amount];
+    [title_ setDimmingAmount:amount];
 }
 
 - (void)setDimmed:(BOOL)isDimmed
@@ -201,11 +218,7 @@ static NSDate* lastResizeDate_;
         return;
     }
     if (session_) {
-        if ([[[session_ tab] realParentWindow] broadcastInputToSession:session_]) {
-            dim_ = NO;
-        } else {
-            dim_ = isDimmed;
-        }
+        dim_ = isDimmed;
         [self updateDim];
     } else {
         dim_ = isDimmed;
@@ -247,11 +260,33 @@ static NSDate* lastResizeDate_;
 
 - (void)mouseDown:(NSEvent*)event
 {
+    static int inme;
+    if (inme) {
+        // Avoid infinite recursion. Not quite sure why this happens, but a call
+        // to [title_ mouseDown:] or [super mouseDown:] will sometimes (after a
+        // few steps through the OS) bring you back here. It only happens
+        // consistently when dragging the pane title bar, but it happens inconsitently
+        // with clicks in the title bar too.
+        return;
+    }
+    ++inme;
+    // A click on the very top of the screen while in full screen mode may not be
+    // in any subview!
+    NSPoint p = [NSEvent mouseLocation];
+    NSPoint basePoint = [[self window] convertScreenToBase:p];
+    NSPoint relativePoint = [self convertPointFromBase:basePoint];
+    if (title_ && NSPointInRect(relativePoint, [title_ frame])) {
+        [title_ mouseDown:event];
+        --inme;
+        return;
+    }
     if (splitSelectionView_) {
         [splitSelectionView_ mouseDown:event];
-    } else if ([[[self session] TEXTVIEW] mouseDownImpl:event]) {
+    } else if (NSPointInRect(relativePoint, [[[self session] SCROLLVIEW] frame]) &&
+               [[[self session] TEXTVIEW] mouseDownImpl:event]) {
         [super mouseDown:event];
     }
+    --inme;
 }
 
 - (FindViewController*)findViewController
@@ -441,6 +476,61 @@ static NSDate* lastResizeDate_;
 - (BOOL)wantsPeriodicDraggingUpdates
 {
     return YES;
+}
+
+- (BOOL)setShowTitle:(BOOL)value
+{
+    if (value == showTitle_) {
+        return NO;
+    }
+    showTitle_ = value;
+    PTYScrollView *scrollView = [session_ SCROLLVIEW];
+    NSRect frame = [scrollView frame];
+    if (showTitle_) {
+        frame.size.height -= kTitleHeight;
+        title_ = [[[SessionTitleView alloc] initWithFrame:NSMakeRect(0,
+                                                                     self.frame.size.height - kTitleHeight,
+                                                                     self.frame.size.width,
+                                                                     kTitleHeight)] autorelease];
+        [title_ setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+        title_.delegate = self;
+        [self addSubview:title_];
+    } else {
+        frame.size.height += kTitleHeight;
+        [title_ removeFromSuperview];
+        title_ = nil;
+    }
+    [scrollView setFrame:frame];
+    [self setTitle:[session_ name]];
+    return YES;
+}
+
+- (void)setTitle:(NSString *)title
+{
+    if (!title) {
+        title = @"";
+    }
+    title_.title = title;
+    [title_ setNeedsDisplay:YES];
+}
+
+#pragma mark SessionTitleViewDelegate
+
+- (NSMenu *)menu
+{
+    return [[session_ TEXTVIEW] menuForEvent:nil];
+}
+
+- (void)close
+{
+    [[[session_ tab] realParentWindow] closeSessionWithConfirmation:session_];
+}
+
+- (void)beginDrag
+{
+    if (![[MovePaneController sharedInstance] session]) {
+        [[MovePaneController sharedInstance] beginDrag:session_];
+    }
 }
 
 @end

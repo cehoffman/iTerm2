@@ -58,6 +58,14 @@
 #define KEY_DEFAULT_BOOKMARK            @"Default Bookmark"  // deprecated
 #define KEY_ASK_ABOUT_OUTDATED_KEYMAPS  @"Ask About Outdated Keymaps"
 
+// Advanced working directory settings
+#define KEY_AWDS_WIN_OPTION             @"AWDS Window Option"
+#define KEY_AWDS_WIN_DIRECTORY          @"AWDS Window Directory"
+#define KEY_AWDS_TAB_OPTION             @"AWDS Tab Option"
+#define KEY_AWDS_TAB_DIRECTORY          @"AWDS Tab Directory"
+#define KEY_AWDS_PANE_OPTION            @"AWDS Pane Option"
+#define KEY_AWDS_PANE_DIRECTORY         @"AWDS Pane Directory"
+
 // Per-bookmark keys ----------------------------------------------------------
 // IMPORATANT: If you add keys, also modify doCopyFrom in PreferencePanel.m.
 
@@ -129,6 +137,7 @@
 #define KEY_SCROLLBACK_WITH_STATUS_BAR        @"Scrollback With Status Bar"
 #define KEY_SCROLLBACK_IN_ALTERNATE_SCREEN    @"Scrollback in Alternate Screen"
 #define KEY_BOOKMARK_GROWL_NOTIFICATIONS      @"BM Growl"
+#define KEY_SET_LOCALE_VARS                   @"Set Local Environment Vars"
 #define KEY_CHARACTER_ENCODING                @"Character Encoding"
 #define KEY_SCROLLBACK_LINES                  @"Scrollback Lines"
 #define KEY_UNLIMITED_SCROLLBACK              @"Unlimited Scrollback"
@@ -148,12 +157,23 @@
 #define KEY_OPTION_KEY_SENDS                  @"Option Key Sends"
 #define KEY_RIGHT_OPTION_KEY_SENDS            @"Right Option Key Sends"
 
+// Advanced
+#define KEY_TRIGGERS                         @"Triggers"  // NSArray of NSDictionary
+#define KEY_SMART_SELECTION_RULES            @"Smart Selection Rules"
+#define KEY_TROUTER                          @"Semantic History"
+
 #define WINDOW_TYPE_NORMAL 0
 #define WINDOW_TYPE_FULL_SCREEN 1  // Creates a normal window but all callers to initWithSmartLayout will toggle fullscreen mode if this is the windowType.
 #define WINDOW_TYPE_TOP 2
 #define WINDOW_TYPE_FORCE_FULL_SCREEN 3  // Used internally, never reported by windowType API. Causes initWithSmartLayout to create a window with fullscreen chrome. It will set its windowType to FULL_SCREEN
 #define WINDOW_TYPE_LION_FULL_SCREEN 4  // Lion-native fullscreen
 #define WINDOW_TYPE_BOTTOM 5
+
+typedef enum {
+  iTermWindowObject,
+  iTermTabObject,
+  iTermPaneObject,
+} iTermObjectType;
 
 @interface ITAddressBookMgr : NSObject
 {
@@ -192,6 +212,7 @@
 - (NSString*) getBonjourServiceType:(NSString*)aType;
 + (NSString*)loginShellCommandForBookmark:(Bookmark*)bookmark;
 + (NSString*)bookmarkCommand:(Bookmark*)bookmark isLoginSession:(BOOL*)isLoginSession;
-+ (NSString*)bookmarkWorkingDirectory:(Bookmark*)bookmark;
++ (NSString*)bookmarkWorkingDirectory:(Bookmark*)bookmark
+                        forObjectType:(iTermObjectType)objectType;
 
 @end

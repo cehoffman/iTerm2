@@ -36,8 +36,11 @@
 
 #import <Foundation/Foundation.h>
 
+extern NSString *kCoprocessStatusChangeNotification;
+
 // Silence a few warnings.
 @class PTYTab;
+@class Coprocess;
 
 @protocol PTYTaskDelegate
 - (void) closeTab:(PTYTab*)aSession;
@@ -53,16 +56,19 @@
     NSString* path;
     BOOL hasOutput;
 
-    NSLock* writeLock;
+    NSLock* writeLock;  // protects writeBuffer
     NSMutableData* writeBuffer;
 
     NSString* logPath;
     NSFileHandle* logHandle;
+
+    Coprocess *coprocess_;  // synchronized (self)
+    BOOL brokenPipe_;
 }
 
 - (id)init;
 - (void)dealloc;
-
+- (BOOL)hasBrokenPipe;
 - (void)launchWithPath:(NSString*)progpath
              arguments:(NSArray*)args
            environment:(NSDictionary*)env
@@ -100,6 +106,12 @@
 - (void)brokenPipe;
 - (void)processRead;
 - (void)processWrite;
+
+- (void)setCoprocess:(Coprocess *)coprocess;
+- (Coprocess *)coprocess;
+- (BOOL)writeBufferHasRoom;
+- (BOOL)hasCoprocess;
+- (void)stopCoprocess;
 
 @end
 
