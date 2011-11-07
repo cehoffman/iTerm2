@@ -475,45 +475,60 @@ NSString *sessionsKey = @"sessions";
         [[self window] setCollectionBehavior:[[self window] collectionBehavior] & ~NSWindowCollectionBehaviorParticipatesInCycle];        
     }
 
-    if (windowType == WINDOW_TYPE_NORMAL) {
-        drawer_ = [[NSDrawer alloc] initWithContentSize:NSMakeSize(200, self.window.frame.size.height)
-                                          preferredEdge:CGRectMaxXEdge];
-        [drawer_ setParentWindow:self.window];
-        NSSize contentSize = [drawer_ contentSize];
-        NSRect toolbeltFrame = NSMakeRect(0, 0, contentSize.width, contentSize.height);;
-        toolbelt_ = [[[ToolbeltView alloc] initWithFrame:toolbeltFrame
-                                                    term:self] autorelease];
-        [drawer_ setContentView:toolbelt_];
-        iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
-        if ([itad showToolbelt]) {
-            [drawer_ open];
-        }
-    } else {
+    toolbelt_ = [[[ToolbeltView alloc] initWithFrame:NSMakeRect(0, 0, 200, self.window.frame.size.height - kToolbeltMargin)
+                                                term:self] autorelease];
+    [self _updateToolbeltParentage];
+
+    wellFormed_ = YES;
+    [[self window] futureSetRestorable:YES];
+    [[self window] futureSetRestorationClass:[PseudoTerminalRestorer class]];
+    return self;
+}
+
+- (void)_updateToolbeltParentage
+{
+    iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
+    if ([self anyFullScreen]) {
         CGFloat width = [self fullscreenToolbeltWidth];
         NSRect toolbeltFrame = NSMakeRect(self.window.frame.size.width - width,
                                           0,
                                           width,
                                           self.window.frame.size.height - kToolbeltMargin);
-        toolbelt_ = [[[ToolbeltView alloc] initWithFrame:toolbeltFrame
-                                                    term:self] autorelease];
-        [toolbelt_ setHidden:YES];
+        [toolbelt_ retain];
+        [toolbelt_ removeFromSuperview];
+        [toolbelt_ setFrame:toolbeltFrame];
+        [toolbelt_ setHidden:![itad showToolbelt]];
         [[[self window] contentView] addSubview:toolbelt_
                                      positioned:NSWindowBelow
                                      relativeTo:TABVIEW];
+        [toolbelt_ release];
+        [self repositionWidgets];
+        [drawer_ close];
+    } else {
+        if (!drawer_) {
+            drawer_ = [[NSDrawer alloc] initWithContentSize:NSMakeSize(200, self.window.frame.size.height)
+                                              preferredEdge:CGRectMaxXEdge];
+            [drawer_ setParentWindow:self.window];
+        }
+        NSSize contentSize = [drawer_ contentSize];
+        NSRect toolbeltFrame = NSMakeRect(0, 0, contentSize.width, contentSize.height);
+        [toolbelt_ retain];
+        [toolbelt_ removeFromSuperview];
+        [toolbelt_ setFrame:toolbeltFrame];
+        [drawer_ setContentView:toolbelt_];
+        [toolbelt_ release];
+        [toolbelt_ setHidden:NO];
+        if ([itad showToolbelt]) {
+            [drawer_ open];
+        }
     }
-
-    wellFormed_ = YES;
-    [[self window] futureSetRestorable:YES];
-    [[self window] futureSetRestorationClass:[PseudoTerminalRestorer class]];
-    NSLog(@"init window of size %@", [NSValue valueWithSize:self.window.frame.size]);
-    return self;
 }
 
 - (CGFloat)tabviewWidth
 {
     if ([self anyFullScreen]) {
         iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
-        if ([itad showToolbelt]) {
+        if ([itad showToolbelt] && !exitingLionFullscreen_) {
             const CGFloat width = [self fullscreenToolbeltWidth];
             return self.window.frame.size.width - width;
         } else {
@@ -534,7 +549,7 @@ NSString *sessionsKey = @"sessions";
 - (void)_updateDrawerVisibility:(id)sender
 {
     iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
-    if (windowType_ != WINDOW_TYPE_NORMAL) {
+    if (windowType_ != WINDOW_TYPE_NORMAL || [self anyFullScreen]) {
         if ([itad showToolbelt]) {
             [toolbelt_ setHidden:NO];
         } else {
@@ -1275,7 +1290,6 @@ NSString *sessionsKey = @"sessions";
         [[term window] setFrame:rect display:NO];
     }
 
-    NSLog(@"bare term has rect %@", [NSValue valueWithRect:term.window.frame]);
     return term;
 }
 
@@ -2101,24 +2115,35 @@ NSString *sessionsKey = @"sessions";
     togglingLionFullScreen_ = NO;
     lionFullScreen_ = YES;
     // Set scrollbars appropriately
+    [self _updateToolbeltParentage];
     [self fitTabsToWindow];
     [self futureInvalidateRestorableState];
 }
 
 - (void)windowWillExitFullScreen:(NSNotification *)notification
 {
+    exitingLionFullscreen_ = YES;
     [self fitTabsToWindow];
+    iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
+    if ([itad showToolbelt]) {
+        [toolbelt_ setHidden:YES];
+    }
     [self repositionWidgets];
 }
 
 - (void)windowDidExitFullScreen:(NSNotification *)notification
 {
+    exitingLionFullscreen_ = NO;
     zooming_ = NO;
     lionFullScreen_ = NO;
     // Set scrollbars appropriately
     [self fitTabsToWindow];
     [self repositionWidgets];
     [self futureInvalidateRestorableState];
+    [self _updateToolbeltParentage];
+    // TODO this is only ok because top, bottom, and non-lion fullscreen windows
+    // can't become lion fullscreen windows:
+    windowType_ = WINDOW_TYPE_NORMAL;
 }
 
 - (NSRect)windowWillUseStandardFrame:(NSWindow *)sender defaultFrame:(NSRect)defaultFrame
@@ -3271,6 +3296,7 @@ NSString *sessionsKey = @"sessions";
     }
     [[self currentTab] recheckBlur];
     [[self currentTab] numberOfSessionsDidChange];
+    [sessionView updateDim];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"iTermNumberOfSessionsDidChange" object: self userInfo: nil];
 }
 
@@ -4139,7 +4165,7 @@ NSString *sessionsKey = @"sessions";
         }
     }
 
-    if (windowType_ != WINDOW_TYPE_NORMAL) {
+    if (windowType_ != WINDOW_TYPE_NORMAL || (!exitingLionFullscreen_ && [self anyFullScreen])) {
         iTermApplicationDelegate *itad = (iTermApplicationDelegate *)[[iTermApplication sharedApplication] delegate];
         if ([itad showToolbelt]) {
             const CGFloat width = [self fullscreenToolbeltWidth];
@@ -4991,6 +5017,9 @@ NSString *sessionsKey = @"sessions";
 
 - (void)window:(NSWindow *)window willEncodeRestorableState:(NSCoder *)state
 {
+    if ([self isHotKeyWindow]) {
+        return;
+    }
     if (wellFormed_) {
         [lastArrangement_ release];
         lastArrangement_ = [[self arrangement] retain];

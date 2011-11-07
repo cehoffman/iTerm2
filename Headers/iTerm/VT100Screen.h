@@ -143,6 +143,7 @@ void StringToScreenChars(NSString *s,
     // Scrollback buffer
     LineBuffer* linebuffer;
     FindContext findContext;
+    long long savedFindContextAbsPos_;
 
     // Used for recording instant replay.
     DVR* dvr;
@@ -317,8 +318,21 @@ void StringToScreenChars(NSString *s,
 // Accessor.
 - (DVR*)dvr;
 
+// If this returns true then the textview will broadcast iTermTabContentsChanged
+// when a dirty char is found.
+- (BOOL)shouldSendContentsChangedNotification;
+
 // Load a frame from a dvr decoder.
 - (void)setFromFrame:(screen_char_t*)s len:(int)len info:(DVRFrameInfo)info;
+
+// Save the position of the current find context (with the screen appended).
+- (void)saveFindContextAbsPos;
+
+// Save the position of the end of the scrollback buffer without the screen appeneded.
+- (void)saveTerminalAbsPos;
+
+// Restore the saved position into a passed-in find context (see saveFindContextAbsPos and saveTerminalAbsPos).
+- (void)restoreSavedPositionToFindContext:(FindContext *)context;
 
 @end
 

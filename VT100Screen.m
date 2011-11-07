@@ -52,6 +52,7 @@
 #import "DVRBuffer.h"
 #import "PTYTab.h"
 #import "ITAddressBookMgr.h"
+#import "iTermExpose.h"
 
 #define MAX_SCROLLBACK_LINES 1000000
 #define DIRTY_MAGIC 0x76  // Used to ensure we don't go off end of dirty array
@@ -1222,7 +1223,10 @@ static char* FormatCont(int c)
         }
         [SESSION clearTriggerLine];
         break;
-    case VT100CC_CR:  [self setCursorX:0 Y:cursorY]; break;
+    case VT100CC_CR:
+        [self setCursorX:0 Y:cursorY];
+        [SESSION clearTriggerLine];
+        break;
     case VT100CC_SO:  break;
     case VT100CC_SI:  break;
     case VT100CC_DC1: break;
@@ -1654,7 +1658,7 @@ static char* FormatCont(int c)
     [display clearMatches];
 
     scrollback_overflow = 0;
-
+    savedFindContextAbsPos_ = 0;
     DebugLog(@"clearScrollbackBuffer setDirty");
 
     [self setDirty];
@@ -3257,6 +3261,35 @@ void DumpBuf(screen_char_t* p, int n) {
     return &findContext;
 }
 
+- (long long)findContextAbsPosition
+{
+    return [linebuffer absPositionOfFindContext:findContext];
+}
+
+- (void)saveFindContextAbsPos
+{
+    int linesPushed;
+    linesPushed = [self _appendScreenToScrollback:[self _usedHeight]];
+    savedFindContextAbsPos_ = [self findContextAbsPosition];
+    [self _popScrollbackLines:linesPushed];
+}
+
+- (void)saveTerminalAbsPos
+{
+    savedFindContextAbsPos_ = [linebuffer absPositionForPosition:[linebuffer lastPos]];
+}
+
+- (void)restoreSavedPositionToFindContext:(FindContext *)context
+{
+    int linesPushed;
+    linesPushed = [self _appendScreenToScrollback:[self _usedHeight]];
+
+    [linebuffer storeLocationOfAbsPos:savedFindContextAbsPos_
+                            inContext:context];
+
+    [self _popScrollbackLines:linesPushed];
+}
+
 - (void)initFindString:(NSString*)aString
       forwardDirection:(BOOL)direction
           ignoringCase:(BOOL)ignoreCase
@@ -3577,6 +3610,11 @@ void DumpBuf(screen_char_t* p, int n) {
     return dvr;
 }
 
+- (BOOL)shouldSendContentsChangedNotification
+{
+    return [[iTermExpose sharedInstance] isVisible] ||
+           [SESSION wantsContentChangedNotification];
+}
 
 @end
 

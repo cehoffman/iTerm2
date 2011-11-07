@@ -1728,7 +1728,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 10.5;
 				OTHER_LDFLAGS = "-licucore";
 				PRODUCT_NAME = iTerm;
-				SDKROOT = macosx10.7;
+				SDKROOT = macosx;
 				VALID_ARCHS = x86_64;
 				WARNING_CFLAGS = "-Wall";
 				WRAPPER_EXTENSION = app;
@@ -1739,7 +1739,11 @@
 		BB024D38096EE4080021E793 /* Default */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ARCHS = "$(ARCHS_STANDARD_32_64_BIT)";
+				ARCHS = (
+					ppc,
+					x86_64,
+					i386,
+				);
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"\"$(SRCROOT)\"",
@@ -1766,7 +1770,7 @@
 				OTHER_REZFLAGS = "";
 				PRODUCT_NAME = iTerm;
 				REZ_EXECUTABLE = YES;
-				SDKROOT = macosx10.7;
+				SDKROOT = macosx;
 				SECTORDER_FLAGS = "";
 				VALID_ARCHS = x86_64;
 				WARNING_CFLAGS = "-Wall";
@@ -1808,7 +1812,7 @@
 				GCC_WARN_SIGN_COMPARE = NO;
 				MACOSX_DEPLOYMENT_TARGET = 10.5;
 				PREBINDING = NO;
-				SDKROOT = macosx10.7;
+				SDKROOT = macosx;
 				VALID_ARCHS = x86_64;
 				WARNING_CFLAGS = "-Wall";
 			};
@@ -1824,7 +1828,7 @@
 				GCC_WARN_SIGN_COMPARE = NO;
 				MACOSX_DEPLOYMENT_TARGET = 10.5;
 				PREBINDING = NO;
-				SDKROOT = macosx10.7;
+				SDKROOT = macosx;
 				VALID_ARCHS = x86_64;
 				WARNING_CFLAGS = "-Wall";
 			};

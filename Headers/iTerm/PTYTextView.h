@@ -31,6 +31,7 @@
 #import "ScreenChar.h"
 #import "PreferencePanel.h"
 #import "Trouter.h"
+#import "LineBuffer.h"
 
 #include <sys/time.h>
 #define PRETTY_BOLD
@@ -298,6 +299,9 @@ typedef struct PTYFontInfo PTYFontInfo;
 
     // Show a background indicator when in broadcast input mode
     BOOL useBackgroundIndicator_;
+
+    // Find context just after initialization.
+    FindContext initialFindContext_;
 }
 
 + (NSCursor *)textViewCursor;
@@ -531,6 +535,11 @@ typedef struct PTYFontInfo PTYFontInfo;
 - (double)perceivedBrightness:(NSColor*)c;
 - (void)drawOutlineInRect:(NSRect)rect topOnly:(BOOL)topOnly;
 
+// Add a search result for highlighting in yellow.
+- (void)addResultFromX:(int)resStartX absY:(long long)absStartY toX:(int)resEndX toAbsY:(long long)absEndY;
+
+- (FindContext *)initialFindContext;
+
 @end
 
 //
@@ -576,8 +585,16 @@ typedef enum {
          overrideColor:(NSColor*)overrideColor;
 
 - (BOOL)_isBlankLine:(int)y;
-- (void)_openURL:(NSString *)aURLString inBackground:(BOOL)background;
-- (void)_openURL:(NSString *)aURLString atLine:(long long)line inBackground:(BOOL)background;
+- (void)_findUrlInString:(NSString *)aURLString andOpenInBackground:(BOOL)background;
+- (void)_openSemanticHistoryForUrl:(NSString *)aURLString
+                            atLine:(long long)line
+                      inBackground:(BOOL)background
+                            prefix:(NSString *)prefix
+                            suffix:(NSString *)suffix;
+- (NSString *)wrappedStringAtX:(int)xi
+                             y:(int)yi
+                           dir:(int)dir
+           respectHardNewlines:(BOOL)respectHardNewlines;
 
 // Snapshot working directory for Trouter
 - (void)logWorkingDirectoryAtLine:(long long)line;
