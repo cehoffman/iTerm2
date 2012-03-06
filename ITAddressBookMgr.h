@@ -29,7 +29,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Cocoa/Cocoa.h>
-#import <iTerm/BookmarkModel.h>
+#import "ProfileModel.h"
 
 // Prefs-level keys
 #define KEY_DEFAULT_GUID                @"Default Bookmark Guid"  // use this instead (not in a bookmark)
@@ -115,6 +115,7 @@
 #define KEY_USE_BOLD_FONT          @"Use Bold Font"
 #define KEY_USE_BRIGHT_BOLD        @"Use Bright Bold"
 #define KEY_TRANSPARENCY           @"Transparency"
+#define KEY_BLEND                  @"Blend"
 #define KEY_BLUR                   @"Blur"
 #define KEY_BLUR_RADIUS            @"Blur Radius"
 #define KEY_ANTI_ALIASING          @"Anti Aliasing"  // DEPRECATED
@@ -124,6 +125,7 @@
 
 // Terminal
 #define KEY_DISABLE_WINDOW_RESIZING           @"Disable Window Resizing"
+#define KEY_HIDE_AFTER_OPENING                @"Hide After Opening"
 #define KEY_SYNC_TITLE                        @"Sync Title"
 #define KEY_CLOSE_SESSIONS_ON_END             @"Close Sessions On End"
 #define KEY_TREAT_NON_ASCII_AS_DOUBLE_WIDTH   @"Non Ascii Double Width"  // DEPRECATED
@@ -202,7 +204,7 @@ typedef enum {
 + (NSFont *)fontWithDesc:(NSString *)fontDesc;
 + (NSString*)descFromFont:(NSFont*)font;
 - (void)setBookmarks:(NSArray*)newBookmarksArray defaultGuid:(NSString*)guid;
-- (BookmarkModel*)model;
+- (ProfileModel*)model;
 - (void)netServiceBrowser:(NSNetServiceBrowser *)aNetServiceBrowser didFindService:(NSNetService *)aNetService moreComing:(BOOL)moreComing;
 - (void)netServiceBrowser:(NSNetServiceBrowser *)aNetServiceBrowser didRemoveService:(NSNetService *)aNetService moreComing:(BOOL)moreComing;
 - (void)netServiceDidResolveAddress:(NSNetService *)sender;
@@ -210,9 +212,13 @@ typedef enum {
 - (void)netServiceWillResolve:(NSNetService *)aNetService;
 - (void)netServiceDidStop:(NSNetService *)aNetService;
 - (NSString*) getBonjourServiceType:(NSString*)aType;
-+ (NSString*)loginShellCommandForBookmark:(Bookmark*)bookmark;
-+ (NSString*)bookmarkCommand:(Bookmark*)bookmark isLoginSession:(BOOL*)isLoginSession;
-+ (NSString*)bookmarkWorkingDirectory:(Bookmark*)bookmark
++ (NSString*)loginShellCommandForBookmark:(Profile*)bookmark
+							 asLoginShell:(BOOL*)asLoginShell
+							forObjectType:(iTermObjectType)objectType;
++ (NSString*)bookmarkCommand:(Profile*)bookmark
+			  isLoginSession:(BOOL*)isLoginSession
+			   forObjectType:(iTermObjectType)objectType;
++ (NSString*)bookmarkWorkingDirectory:(Profile*)bookmark
                         forObjectType:(iTermObjectType)objectType;
 
 @end

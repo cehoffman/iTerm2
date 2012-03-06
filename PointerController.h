@@ -14,7 +14,8 @@
 - (void)pasteFromSelectionWithEvent:(NSEvent *)event;
 - (void)openTargetWithEvent:(NSEvent *)event;
 - (void)openTargetInBackgroundWithEvent:(NSEvent *)event;
-- (void)smartSelectWithEvent:(NSEvent *)event;
+- (void)smartSelectAndMaybeCopyWithEvent:(NSEvent *)event
+                        ignoringNewlines:(BOOL)ignoringNewlines;
 - (void)openContextMenuWithEvent:(NSEvent *)event;
 - (void)nextTabWithEvent:(NSEvent *)event;
 - (void)previousTabWithEvent:(NSEvent *)event;
@@ -41,6 +42,7 @@
 @interface PointerController : NSObject {
     NSObject<PointerControllerDelegate> *delegate_;
     int mouseDownButton_;
+    int clicks_;
 }
 
 @property (nonatomic, assign) NSObject<PointerControllerDelegate> *delegate;
@@ -49,5 +51,7 @@
 - (BOOL)mouseUp:(NSEvent *)event withTouches:(int)numTouches;
 - (void)swipeWithEvent:(NSEvent *)event;
 - (BOOL)eventEmulatesRightClick:(NSEvent *)event;
+- (BOOL)viewShouldTrackTouches;
+- (void)notifyLeftMouseDown;
 
 @end

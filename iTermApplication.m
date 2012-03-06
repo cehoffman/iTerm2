@@ -29,12 +29,12 @@
  */
 
 #import "iTermApplication.h"
-#import <iTerm/iTermController.h>
-#import <iTerm/PTYWindow.h>
-#import <iTerm/PseudoTerminal.h>
-#import <iTerm/PTYSession.h>
-#import <iTerm/PreferencePanel.h>
-#import <iTerm/PTYTextView.h>
+#import "iTermController.h"
+#import "PTYWindow.h"
+#import "PseudoTerminal.h"
+#import "PTYSession.h"
+#import "PreferencePanel.h"
+#import "PTYTextView.h"
 #import "iTermKeyBindingMgr.h"
 
 @implementation iTermApplication
@@ -108,7 +108,7 @@
         PTYSession* currentSession = [currentTerminal currentSession];
         NSResponder *responder;
 
-        if (([event modifierFlags] & (NSCommandKeyMask | NSAlternateKeyMask)) == [prefPanel modifierTagToMask:[prefPanel switchWindowModifier]]) {
+        if (([event modifierFlags] & (NSControlKeyMask | NSCommandKeyMask | NSAlternateKeyMask)) == [prefPanel modifierTagToMask:[prefPanel switchWindowModifier]]) {
             // Command-Alt (or selected modifier) + number: Switch to window by number.
             int digit = [[event charactersIgnoringModifiers] intValue];
             if (!digit) {

@@ -24,22 +24,22 @@
  **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#import <iTerm/iTerm.h>
-#import <iTerm/PTYSession.h>
-#import <iTerm/PTYTask.h>
-#import <iTerm/PTYTextView.h>
-#import <iTerm/PTYScrollView.h>
-#import <iTerm/VT100Screen.h>
-#import <iTerm/VT100Terminal.h>
-#import <iTerm/PreferencePanel.h>
-#import <WindowControllerInterface.h>
-#import <iTerm/iTermController.h>
-#import <iTerm/PseudoTerminal.h>
-#import <FakeWindow.h>
-#import <iTerm/NSStringITerm.h>
-#import <iTerm/iTermKeyBindingMgr.h>
-#import <iTerm/ITAddressBookMgr.h>
-#import <iTerm/iTermGrowlDelegate.h>
+#import "iTerm.h"
+#import "PTYSession.h"
+#import "PTYTask.h"
+#import "PTYTextView.h"
+#import "PTYScrollView.h"
+#import "VT100Screen.h"
+#import "VT100Terminal.h"
+#import "PreferencePanel.h"
+#import "WindowControllerInterface.h"
+#import "iTermController.h"
+#import "PseudoTerminal.h"
+#import "FakeWindow.h"
+#import "NSStringITerm.h"
+#import "iTermKeyBindingMgr.h"
+#import "ITAddressBookMgr.h"
+#import "iTermGrowlDelegate.h"
 #import "iTermApplicationDelegate.h"
 #import "SessionView.h"
 #import "PTYTab.h"
@@ -47,6 +47,11 @@
 #import "MovePaneController.h"
 #import "Trigger.h"
 #import "Coprocess.h"
+#import "TmuxGateway.h"
+#import "TmuxController.h"
+#import "TmuxLayoutParser.h"
+#import "MovePaneController.h"
+#import "TmuxStateParser.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -56,6 +61,18 @@
 #define DEBUG_METHOD_TRACE    0
 #define DEBUG_KEYDOWNDUMP     0
 #define ASK_ABOUT_OUTDATED_FORMAT @"AskAboutOutdatedKeyMappingForGuid%@"
+
+#define TMUX_VERBOSE_LOGGING
+#ifdef TMUX_VERBOSE_LOGGING
+#define TmuxLog NSLog
+#else
+#define TmuxLog(args...) \
+do { \
+if (gDebugLogging) { \
+DebugLog([NSString stringWithFormat:args]); \
+} \
+} while (0)
+#endif
 
 @implementation PTYSession
 
@@ -69,6 +86,12 @@ static NSString* SESSION_ARRANGEMENT_COLUMNS = @"Columns";
 static NSString* SESSION_ARRANGEMENT_ROWS = @"Rows";
 static NSString* SESSION_ARRANGEMENT_BOOKMARK = @"Bookmark";
 static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
+static NSString* SESSION_ARRANGEMENT_TMUX_PANE = @"Tmux Pane";
+static NSString* SESSION_ARRANGEMENT_TMUX_HISTORY = @"Tmux History";
+static NSString* SESSION_ARRANGEMENT_TMUX_ALT_HISTORY = @"Tmux AltHistory";
+static NSString* SESSION_ARRANGEMENT_TMUX_STATE = @"Tmux State";
+
+static NSString *kTmuxFontChanged = @"kTmuxFontChanged";
 
 // init/dealloc
 - (id)init
@@ -120,7 +143,10 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
                                              selector:@selector(sessionContentsChanged:)
                                                  name:@"iTermTabContentsChanged"
                                                object:nil];
-
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(synchronizeTmuxFonts:)
+                                                 name:kTmuxFontChanged
+                                               object:nil];
     return self;
 }
 
@@ -151,6 +177,8 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     [updateTimer release];
     [originalAddressBookEntry release];
     [liveSession_ release];
+    [tmuxGateway_ release];
+    [tmuxController_ release];
 
     [SHELL release];
     SHELL = nil;
@@ -268,7 +296,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
 
 + (void)drawArrangementPreview:(NSDictionary *)arrangement frame:(NSRect)frame
 {
-    Bookmark* theBookmark = [[BookmarkModel sharedInstance] bookmarkWithGuid:[[arrangement objectForKey:SESSION_ARRANGEMENT_BOOKMARK] objectForKey:KEY_GUID]];
+    Profile* theBookmark = [[ProfileModel sharedInstance] bookmarkWithGuid:[[arrangement objectForKey:SESSION_ARRANGEMENT_BOOKMARK] objectForKey:KEY_GUID]];
     if (!theBookmark) {
         theBookmark = [arrangement objectForKey:SESSION_ARRANGEMENT_BOOKMARK];
     }
@@ -277,6 +305,11 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     NSRectFill(frame);
 }
 
+- (void)setSizeFromArrangement:(NSDictionary*)arrangement
+{
+    [self setWidth:[[arrangement objectForKey:SESSION_ARRANGEMENT_COLUMNS] intValue]
+            height:[[arrangement objectForKey:SESSION_ARRANGEMENT_ROWS] intValue]];
+}
 
 + (PTYSession*)sessionFromArrangement:(NSDictionary*)arrangement
                                inView:(SessionView*)sessionView
@@ -286,7 +319,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     PTYSession* aSession = [[[PTYSession alloc] init] autorelease];
     aSession->view = sessionView;
     [[sessionView findViewController] setDelegate:aSession];
-    Bookmark* theBookmark = [[BookmarkModel sharedInstance] bookmarkWithGuid:[[arrangement objectForKey:SESSION_ARRANGEMENT_BOOKMARK] objectForKey:KEY_GUID]];
+    Profile* theBookmark = [[ProfileModel sharedInstance] bookmarkWithGuid:[[arrangement objectForKey:SESSION_ARRANGEMENT_BOOKMARK] objectForKey:KEY_GUID]];
     BOOL needDivorce = NO;
     if (!theBookmark) {
         theBookmark = [arrangement objectForKey:SESSION_ARRANGEMENT_BOOKMARK];
@@ -299,21 +332,66 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     [aSession setAddressBookEntry:theBookmark];
 
     [aSession setScreenSize:[sessionView frame] parent:[theTab realParentWindow]];
-
+    NSDictionary *state = [arrangement objectForKey:SESSION_ARRANGEMENT_TMUX_STATE];
+    if (state) {
+        // For tmux tabs, get the size from the arrangement instead of the containing view because it helps things to line up correctly.
+        [aSession setSizeFromArrangement:arrangement];
+    }
     [aSession setPreferencesFromAddressBookEntry:theBookmark];
     [[aSession SCREEN] setDisplay:[aSession TEXTVIEW]];
     [aSession setName:[theBookmark objectForKey:KEY_NAME]];
+    [aSession setBookmarkName:[theBookmark objectForKey:KEY_NAME]];
     if ([[[[theTab realParentWindow] window] title] compare:@"Window"] == NSOrderedSame) {
         [[theTab realParentWindow] setWindowTitle];
     }
     [aSession setTab:theTab];
-    [aSession runCommandWithOldCwd:[arrangement objectForKey:SESSION_ARRANGEMENT_WORKING_DIRECTORY]
-                     forObjectType:objectType];
-
+    NSNumber *n = [arrangement objectForKey:SESSION_ARRANGEMENT_TMUX_PANE];
+    if (!n) {
+        [aSession runCommandWithOldCwd:[arrangement objectForKey:SESSION_ARRANGEMENT_WORKING_DIRECTORY]
+                         forObjectType:objectType];
+    } else {
+        NSString *title = [state objectForKey:@"title"];
+        if (title) {
+            [aSession setName:title];
+            [aSession setWindowTitle:title];
+        }
+    }
     if (needDivorce) {
         [aSession divorceAddressBookEntryFromPreferences];
     }
 
+    if (n) {
+        [aSession setTmuxPane:[n intValue]];
+    }
+    NSArray *history = [arrangement objectForKey:SESSION_ARRANGEMENT_TMUX_HISTORY];
+    if (history) {
+        [[aSession SCREEN] setHistory:history];
+    }
+    history = [arrangement objectForKey:SESSION_ARRANGEMENT_TMUX_ALT_HISTORY];
+    if (history) {
+        [[aSession SCREEN] setAltScreen:history];
+    }
+    if (state) {
+        [[aSession SCREEN] setTmuxState:state];
+		NSString *pendingOutput = [state objectForKey:@"pending_output"];
+		if (pendingOutput) {
+			NSData *data = [pendingOutput dataFromHexValues];
+			[[aSession TERMINAL] putStreamData:data];
+		}
+        [[aSession TERMINAL] setInsertMode:[[state objectForKey:kStateDictInsertMode] boolValue]];
+        [[aSession TERMINAL] setCursorMode:[[state objectForKey:kStateDictKCursorMode] boolValue]];
+        [[aSession TERMINAL] setKeypadMode:[[state objectForKey:kStateDictKKeypadMode] boolValue]];
+        if ([[state objectForKey:kStateDictMouseStandardMode] boolValue]) {
+            [[aSession TERMINAL] setMouseMode:MOUSE_REPORTING_NORMAL];
+        } else if ([[state objectForKey:kStateDictMouseButtonMode] boolValue]) {
+            [[aSession TERMINAL] setMouseMode:MOUSE_REPORTING_BUTTON_MOTION];
+        } else if ([[state objectForKey:kStateDictMouseAnyMode] boolValue]) {
+            [[aSession TERMINAL] setMouseMode:MOUSE_REPORTING_ALL_MOTION];
+        } else {
+            [[aSession TERMINAL] setMouseMode:MOUSE_REPORTING_NONE];
+        }
+        [[aSession TERMINAL] setMouseFormat:[[state objectForKey:kStateDictMouseUTF8Mode] boolValue] ? MOUSE_FORMAT_XTERM_EXT : MOUSE_FORMAT_XTERM];
+    }
     return aSession;
 }
 
@@ -341,8 +419,10 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     [SCROLLVIEW setAutoresizingMask: NSViewWidthSizable|NSViewHeightSizable];
 
     // assign the main view
-    [view addSubview:SCROLLVIEW];
-    [view setAutoresizesSubviews:YES];
+	[view addSubview:SCROLLVIEW];
+	if (![self isTmuxClient]) {
+		[view setAutoresizesSubviews:YES];
+	}
     // TODO(georgen): I disabled setCopiesOnScroll because there is a vertical margin in the PTYTextView and
     // we would not want that copied. This is obviously bad for performance when scrolling, but it's unclear
     // whether the difference will ever be noticable. I believe it could be worked around (painfully) by
@@ -366,6 +446,9 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     horizontalSpacing:[[addressBookEntry objectForKey:KEY_HORIZONTAL_SPACING] floatValue]
       verticalSpacing:[[addressBookEntry objectForKey:KEY_VERTICAL_SPACING] floatValue]];
     [self setTransparency:[[addressBookEntry objectForKey:KEY_TRANSPARENCY] floatValue]];
+	const float theBlend = [addressBookEntry objectForKey:KEY_BLEND] ?
+						  [[addressBookEntry objectForKey:KEY_BLEND] floatValue] : 0.5;
+    [self setBlend:theBlend];
 
     [WRAPPER addSubview:TEXTVIEW];
     [TEXTVIEW setFrame:NSMakeRect(0, VMARGIN, aSize.width, aSize.height - VMARGIN)];
@@ -422,9 +505,11 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     BOOL isUTF8;
 
     // Grab the addressbook command
-    Bookmark* addressbookEntry = [self addressBookEntry];
+    Profile* addressbookEntry = [self addressBookEntry];
     BOOL loginSession;
-    cmd = [[[NSMutableString alloc] initWithString:[ITAddressBookMgr bookmarkCommand:addressbookEntry isLoginSession:&loginSession]] autorelease];
+    cmd = [[[NSMutableString alloc] initWithString:[ITAddressBookMgr bookmarkCommand:addressbookEntry
+																	  isLoginSession:&loginSession
+																	   forObjectType:objectType]] autorelease];
     NSMutableString* theName = [[[NSMutableString alloc] initWithString:[addressbookEntry objectForKey:KEY_NAME]] autorelease];
     // Get session parameters
     [[[self tab] realParentWindow] getSessionParameters:cmd withName:theName];
@@ -626,7 +711,11 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
         if (lang) {
             [env setObject:lang forKey:@"LANG"];
         } else {
-            [env setObject:[self encodingName] forKey:@"LC_CTYPE"];
+            // Try just the encoding by itself, which might work.
+            NSString *encName = [self encodingName];
+            if (encName && [self _localeIsSupported:encName]) {
+                [env setObject:encName forKey:@"LC_CTYPE"];
+            }
         }
     }
 
@@ -689,6 +778,32 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     if (EXIT) {
         [self _maybeWarnAboutShortLivedSessions];
     }
+    if (tmuxMode_ == TMUX_CLIENT) {
+        assert([tab_ tmuxWindow] >= 0);
+        [tmuxController_ deregisterWindow:[tab_ tmuxWindow]
+                               windowPane:tmuxPane_];
+        // This call to fitLayoutToWindows is necessary to handle the case where
+        // a small window closes and leaves behind a larger (e.g., fullscreen)
+	// window. We want to set the client size to that of the smallest
+	// remaining window.
+        int n = [[tab_ sessions] count];
+        if ([[tab_ sessions] indexOfObjectIdenticalTo:self] != NSNotFound) {
+            n--;
+        }
+        if (n == 0) {
+            // The last session in this tab closed so check if the client has
+            // changed size
+            [tmuxController_ fitLayoutToWindows];
+        }
+    } else if (tmuxMode_ == TMUX_GATEWAY) {
+        [tmuxController_ detach];
+		[tmuxGateway_ release];
+		tmuxGateway_ = nil;
+    }
+	tmuxMode_ = TMUX_NONE;
+    [tmuxController_ release];
+    tmuxController_ = nil;
+
     // The source pane may have just exited. Dogs and cats living together!
     // Mass hysteria!
     [[MovePaneController sharedInstance] exitMovePaneMode];
@@ -705,6 +820,8 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
 
     // final update of display
     [self updateDisplay];
+
+    [tab_ removeSession:self];
 
     [TEXTVIEW setDataSource:nil];
     [TEXTVIEW setDelegate:nil];
@@ -729,11 +846,10 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
         slowPasteTimer = nil;
     }
 
-    [tab_ removeSession:self];
     tab_ = nil;
 }
 
-- (void)writeTask:(NSData*)data
+- (void)writeTaskImpl:(NSData *)data
 {
     static BOOL checkedDebug;
     static BOOL debugKeyDown;
@@ -763,6 +879,70 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     }
 }
 
+- (void)writeTaskNoBroadcast:(NSData *)data
+{
+    if (tmuxMode_ == TMUX_CLIENT) {
+        [[tmuxController_ gateway] sendKeys:data
+                               toWindowPane:tmuxPane_];
+        return;
+    }
+    [self writeTaskImpl:data];
+}
+
+- (void)handleKeypressInTmuxGateway:(unichar)unicode
+{
+    if (unicode == 27) {
+        [self tmuxDetach];
+    } else if (unicode == 'L') {
+        tmuxLogging_ = !tmuxLogging_;
+        [self printTmuxMessage:[NSString stringWithFormat:@"tmux logging %@", (tmuxLogging_ ? @"on" : @"off")]];
+    } else if (unicode == 'C') {
+        NSAlert *alert = [NSAlert alertWithMessageText:@"Enter command to send tmux:"
+                                         defaultButton:@"Ok"
+                                       alternateButton:@"Cancel"
+                                           otherButton:nil
+                             informativeTextWithFormat:@""];
+        NSTextField *tmuxCommand = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
+        [tmuxCommand setEditable:YES];
+        [tmuxCommand setSelectable:YES];
+        [alert setAccessoryView:tmuxCommand];
+        if ([alert runModal] == NSAlertDefaultReturn && [[tmuxCommand stringValue] length]) {
+            [self printTmuxMessage:[NSString stringWithFormat:@"Run command \"%@\"", [tmuxCommand stringValue]]];
+            [tmuxGateway_ sendCommand:[tmuxCommand stringValue]
+                       responseTarget:self
+                     responseSelector:@selector(printTmuxCommandOutputToScreen:)];
+        }
+    } else if (unicode == 'X') {
+        [self printTmuxMessage:@"Exiting tmux mode, but tmux client may still be running."];
+        [self tmuxHostDisconnected];
+    }
+}
+
+- (void)writeTask:(NSData*)data
+{
+    if (tmuxMode_ == TMUX_CLIENT) {
+        [self setBell:NO];
+        if ([[tab_ realParentWindow] broadcastInputToSession:self]) {
+            [[tab_ realParentWindow] sendInputToAllSessions:data];
+        } else {
+            [[tmuxController_ gateway] sendKeys:data
+                                     toWindowPane:tmuxPane_];
+        }
+        PTYScroller* ptys = (PTYScroller*)[SCROLLVIEW verticalScroller];
+        [ptys setUserScroll:NO];
+        return;
+    } else if (tmuxMode_ == TMUX_GATEWAY) {
+        // Use keypresses for tmux gateway commands for development and debugging.
+        NSString *s = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+        for (int i = 0; i < s.length; i++) {
+            unichar unicode = [s characterAtIndex:i];
+            [self handleKeypressInTmuxGateway:unicode];
+        }
+        return;
+    }
+    [self writeTaskImpl:data];
+}
+
 - (void)readTask:(NSData*)data
 {
     if ([data length] == 0 || EXIT) {
@@ -776,6 +956,16 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
       int length = [data length];
       DebugLog([NSString stringWithFormat:@"readTask called with %d bytes. The last byte is %d", (int)length, (int)bytes[length-1]]);
     }
+    if (tmuxMode_ == TMUX_GATEWAY) {
+        if (tmuxLogging_) {
+            [self printTmuxCommandOutputToScreen:[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]];
+        }
+        data = [tmuxGateway_ readTask:data];
+        if (!data) {
+            // All data was consumed.
+            return;
+        }
+    }
 
     [TERMINAL putStreamData:data];
 
@@ -784,6 +974,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     // while loop to process all the tokens we can get
     while (!EXIT &&
            TERMINAL &&
+           tmuxMode_ != TMUX_GATEWAY &&
            ((token = [TERMINAL getNextToken]),
             token.type != VT100_WAIT &&
             token.type != VT100CC_NULL)) {
@@ -866,7 +1057,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
                              [self name],
                              [[self tab] realObjectCount]]
             andNotification:@"Broken Pipes"
-                 andSession:self];
+                 andSession:nil];
     }
 
     EXIT = YES;
@@ -877,6 +1068,19 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     } else {
         [self updateDisplay];
     }
+}
+
+- (NSSize)idealScrollViewSize
+{
+	NSSize innerSize = NSMakeSize([SCREEN width] * [TEXTVIEW charWidth] + MARGIN * 2,
+								  [SCREEN height] * [TEXTVIEW lineHeight] + VMARGIN * 2);
+    BOOL hasScrollbar = ![[tab_ realParentWindow] anyFullScreen] &&
+		![[PreferencePanel sharedInstance] hideScrollbar];
+    NSSize outerSize = [PTYScrollView frameSizeForContentSize:innerSize
+                                        hasHorizontalScroller:NO
+                                          hasVerticalScroller:hasScrollbar
+                                                   borderType:NSNoBorder];
+	return outerSize;
 }
 
 - (int)_keyBindingActionForEvent:(NSEvent*)event
@@ -913,6 +1117,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
         case KEY_ACTION_ESCAPE_SEQUENCE:
         case KEY_ACTION_HEX_CODE:
         case KEY_ACTION_TEXT:
+        case KEY_ACTION_RUN_COPROCESS:
         case KEY_ACTION_IGNORE:
         case KEY_ACTION_SEND_C_H_BACKSPACE:
         case KEY_ACTION_SEND_C_QM_BACKSPACE:
@@ -958,11 +1163,11 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
                                     modifiers:NSCommandKeyMask | NSAlternateKeyMask | NSNumericPadKeyMask
                                    inBookmark:temp];
 
-    BookmarkModel* model;
+    ProfileModel* model;
     if (isDivorced) {
-        model = [BookmarkModel sessionsInstance];
+        model = [ProfileModel sessionsInstance];
     } else {
-        model = [BookmarkModel sharedInstance];
+        model = [ProfileModel sharedInstance];
     }
     [model setBookmark:temp withGuid:[temp objectForKey:KEY_GUID]];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"iTermKeyBindingsChanged"
@@ -973,11 +1178,11 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
 
 - (void)_setKeepOutdatedKeyMapping
 {
-    BookmarkModel* model;
+    ProfileModel* model;
     if (isDivorced) {
-        model = [BookmarkModel sessionsInstance];
+        model = [ProfileModel sessionsInstance];
     } else {
-        model = [BookmarkModel sharedInstance];
+        model = [ProfileModel sharedInstance];
     }
     [model setObject:[NSNumber numberWithBool:NO]
                                        forKey:KEY_ASK_ABOUT_OUTDATED_KEYMAPS
@@ -1006,7 +1211,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
         } else if ([theName isEqualToString:[item title]]) {
             [NSApp sendAction:[item action]
                            to:[item target]
-                         from:nil];
+                         from:item];
             return YES;
         }
     }
@@ -1174,6 +1379,10 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
         return;
     }
 
+    if (!EXIT && tmuxMode_ == TMUX_GATEWAY) {
+        [self handleKeypressInTmuxGateway:unicode];
+        return;
+    }
 
     unsigned short keycode = [event keyCode];
     if (debugKeyDown) {
@@ -1302,6 +1511,12 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
                     return;
                 }
                 [self sendText:keyBindingText];
+                break;
+            case KEY_ACTION_RUN_COPROCESS:
+                if (EXIT) {
+                    return;
+                }
+                [self launchCoprocessWithCommand:keyBindingText];
                 break;
             case KEY_ACTION_SELECT_MENU_ITEM:
                 [PTYSession selectMenuItem:keyBindingText];
@@ -1432,7 +1647,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
             }
         } else if (((modflag & NSLeftAlternateKeyMask) == NSLeftAlternateKeyMask &&
                     ([self optionKey] != OPT_NORMAL)) ||
-                   (modflag == NSAlternateKeyMask && 
+                   (modflag == NSAlternateKeyMask &&
                     ([self optionKey] != OPT_NORMAL)) ||  /// synergy
                    ((modflag & NSRightAlternateKeyMask) == NSRightAlternateKeyMask &&
                     ([self rightOptionKey] != OPT_NORMAL))) {
@@ -1931,7 +2146,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     }
 }
 
-- (NSString*)ansiColorsMatchingForeground:(NSDictionary*)fg andBackground:(NSDictionary*)bg inBookmark:(Bookmark*)aDict
+- (NSString*)ansiColorsMatchingForeground:(NSDictionary*)fg andBackground:(NSDictionary*)bg inBookmark:(Profile*)aDict
 {
     NSColor *fgColor;
     NSColor *bgColor;
@@ -1965,7 +2180,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
 
     aDict = aePrefs;
     if (aDict == nil) {
-        aDict = [[BookmarkModel sharedInstance] defaultBookmark];
+        aDict = [[ProfileModel sharedInstance] defaultBookmark];
     }
     if (aDict == nil) {
         return;
@@ -2023,6 +2238,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
 
     // transparency
     [self setTransparency:[[aDict objectForKey:KEY_TRANSPARENCY] floatValue]];
+    [self setBlend:[[aDict objectForKey:KEY_BLEND] floatValue]];
 
     // bold
     NSNumber* useBoldFontEntry = [aDict objectForKey:KEY_USE_BOLD_FONT];
@@ -2116,19 +2332,21 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
 
 - (NSString*)formattedName:(NSString*)base
 {
+    NSString *prefix = tmuxController_ ? @"↣ " : @"";
+
     BOOL baseIsBookmarkName = [base isEqualToString:bookmarkName];
     PreferencePanel* panel = [PreferencePanel sharedInstance];
     if ([panel jobName] && jobName_) {
         if (baseIsBookmarkName && ![panel showBookmarkName]) {
-            return [NSString stringWithString:[self jobName]];
+            return [NSString stringWithFormat:@"%@%@", prefix, [self jobName]];
         } else {
-            return [NSString stringWithFormat:@"%@ (%@)", base, [self jobName]];
+            return [NSString stringWithFormat:@"%@%@ (%@)", prefix, base, [self jobName]];
         }
     } else {
         if (baseIsBookmarkName && ![panel showBookmarkName]) {
-            return @"Shell";
+            return [NSString stringWithFormat:@"%@Shell", prefix];
         } else {
-            return base;
+            return [NSString stringWithFormat:@"%@%@", prefix, base];
         }
     }
 }
@@ -2179,7 +2397,17 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
 
 - (void)setTab:(PTYTab*)tab
 {
+    if ([self isTmuxClient]) {
+        [tmuxController_ deregisterWindow:[tab_ tmuxWindow]
+                               windowPane:tmuxPane_];
+    }
     tab_ = tab;
+    if ([self isTmuxClient]) {
+        [tmuxController_ registerSession:self
+                                withPane:tmuxPane_
+                                inWindow:[tab_ tmuxWindow]];
+    }
+    [tmuxController_ fitLayoutToWindows];
 }
 
 - (struct timeval)lastOutput
@@ -2556,6 +2784,11 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     return [TEXTVIEW transparency];
 }
 
+- (float)blend
+{
+    return [TEXTVIEW blend];
+}
+
 - (void)setTransparency:(float)transparency
 {
     // Limit transparency because fully transparent windows can't be clicked on.
@@ -2566,6 +2799,11 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     // set transparency of background image
     [SCROLLVIEW setTransparency:transparency];
     [TEXTVIEW setTransparency:transparency];
+}
+
+- (void)setBlend:(float)blendVal
+{
+    [TEXTVIEW setBlend:blendVal];
 }
 
 - (void)setColorTable:(int)theIndex color:(NSColor *)theColor
@@ -2645,7 +2883,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
 - (void)setXtermMouseReporting:(BOOL)set
 {
     xtermMouseReporting = set;
-    [TEXTVIEW updateCursor:[NSApp currentEvent]];
+	[TEXTVIEW updateCursor:[NSApp currentEvent]];
 }
 
 
@@ -2743,7 +2981,7 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     // This is the most practical way to migrate the bopy of a
     // profile that's stored in a saved window arrangement. It doesn't get
     // saved back into the arrangement, unfortunately.
-    [BookmarkModel migratePromptOnCloseInMutableBookmark:dict];
+    [ProfileModel migratePromptOnCloseInMutableBookmark:dict];
 
     if (!originalAddressBookEntry) {
         originalAddressBookEntry = [NSDictionary dictionaryWithDictionary:dict];
@@ -2792,6 +3030,31 @@ static NSString* SESSION_ARRANGEMENT_WORKING_DIRECTORY = @"Working Directory";
     [result setObject:addressBookEntry forKey:SESSION_ARRANGEMENT_BOOKMARK];
     NSString* pwd = [SHELL getWorkingDirectory];
     [result setObject:pwd ? pwd : @"" forKey:SESSION_ARRANGEMENT_WORKING_DIRECTORY];
+    return result;
+}
+
++ (NSDictionary *)arrangementFromTmuxParsedLayout:(NSDictionary *)parseNode
+                                         bookmark:(Profile *)bookmark
+{
+    NSMutableDictionary* result = [NSMutableDictionary dictionaryWithCapacity:3];
+    [result setObject:[parseNode objectForKey:kLayoutDictWidthKey] forKey:SESSION_ARRANGEMENT_COLUMNS];
+    [result setObject:[parseNode objectForKey:kLayoutDictHeightKey] forKey:SESSION_ARRANGEMENT_ROWS];
+    [result setObject:bookmark forKey:SESSION_ARRANGEMENT_BOOKMARK];
+    [result setObject:@"" forKey:SESSION_ARRANGEMENT_WORKING_DIRECTORY];
+    [result setObject:[parseNode objectForKey:kLayoutDictWindowPaneKey] forKey:SESSION_ARRANGEMENT_TMUX_PANE];
+    NSObject *value = [parseNode objectForKey:kLayoutDictHistoryKey];
+    if (value) {
+        [result setObject:value forKey:SESSION_ARRANGEMENT_TMUX_HISTORY];
+    }
+    value = [parseNode objectForKey:kLayoutDictAltHistoryKey];
+    if (value) {
+        [result setObject:value forKey:SESSION_ARRANGEMENT_TMUX_ALT_HISTORY];
+    }
+    value = [parseNode objectForKey:kLayoutDictStateKey];
+    if (value) {
+        [result setObject:value forKey:SESSION_ARRANGEMENT_TMUX_STATE];
+    }
+
     return result;
 }
 
@@ -2954,7 +3217,10 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     return [NSFont fontWithName:[font fontName] size:newSize];
 }
 
-- (void)setFont:(NSFont*)font nafont:(NSFont*)nafont horizontalSpacing:(float)horizontalSpacing verticalSpacing:(float)verticalSpacing
+- (void)setFont:(NSFont*)font
+         nafont:(NSFont*)nafont
+    horizontalSpacing:(float)horizontalSpacing
+    verticalSpacing:(float)verticalSpacing
 {
     if ([[TEXTVIEW font] isEqualTo:font] &&
         [[TEXTVIEW nafont] isEqualTo:nafont] &&
@@ -2969,6 +3235,52 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     // If the window isn't able to adjust, or adjust enough, make the session
     // work with whatever size we ended up having.
     [[self tab] fitSessionToCurrentViewSize:self];
+}
+
+- (void)synchronizeTmuxFonts:(NSNotification *)notification
+{
+    if (!EXIT && [self isTmuxClient]) {
+        NSArray *fonts = [notification object];
+        NSFont *font = [fonts objectAtIndex:0];
+        NSFont *nafont = [fonts objectAtIndex:1];
+        NSNumber *hSpacing = [fonts objectAtIndex:2];
+        NSNumber *vSpacing = [fonts objectAtIndex:3];
+        [TEXTVIEW setFont:font
+                   nafont:nafont
+            horizontalSpacing:[hSpacing doubleValue]
+            verticalSpacing:[vSpacing doubleValue]];
+    }
+}
+
+- (void)notifyTmuxFontChange
+{
+    static BOOL fontChangeNotificationInProgress;
+    if (!fontChangeNotificationInProgress) {
+        fontChangeNotificationInProgress = YES;
+        [[NSNotificationCenter defaultCenter] postNotificationName:kTmuxFontChanged
+                                                            object:[NSArray arrayWithObjects:[TEXTVIEW font],
+                                                                    [TEXTVIEW nafont],
+                                                                    [NSNumber numberWithDouble:[TEXTVIEW horizontalSpacing]],
+                                                                    [NSNumber numberWithDouble:[TEXTVIEW verticalSpacing]],
+                                                                    nil]];
+        fontChangeNotificationInProgress = NO;
+        [PTYTab setTmuxFont:[TEXTVIEW font]
+                     nafont:[TEXTVIEW nafont]
+                   hSpacing:[TEXTVIEW horizontalSpacing]
+                   vSpacing:[TEXTVIEW verticalSpacing]];
+        for (PseudoTerminal *term in [[iTermController sharedInstance] terminals]) {
+            if ([[term uniqueTmuxControllers] count]) {
+                [term refreshTmuxLayoutsAndWindow];
+            }
+        }
+    }
+}
+
+- (void)textViewFontDidChange
+{
+    if ([self isTmuxClient]) {
+        [self notifyTmuxFontChange];
+    }
 }
 
 - (void)setIgnoreResizeNotifications:(BOOL)ignore
@@ -2999,7 +3311,7 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     [self setAddressBookEntry:[NSDictionary dictionaryWithDictionary:temp]];
 
     // Update the model's copy of the bookmark.
-    [[BookmarkModel sessionsInstance] setBookmark:[self addressBookEntry] withGuid:guid];
+    [[ProfileModel sessionsInstance] setBookmark:[self addressBookEntry] withGuid:guid];
 
     // Update an existing one-bookmark prefs dialog, if open.
     if ([[[PreferencePanel sessionsInstance] window] isVisible]) {
@@ -3014,27 +3326,27 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 
 - (NSString*)divorceAddressBookEntryFromPreferences
 {
-    Bookmark* bookmark = [self addressBookEntry];
+    Profile* bookmark = [self addressBookEntry];
     NSString* guid = [bookmark objectForKey:KEY_GUID];
     if (isDivorced) {
         return guid;
     }
     isDivorced = YES;
-    [[BookmarkModel sessionsInstance] removeBookmarkWithGuid:guid];
-    [[BookmarkModel sessionsInstance] addBookmark:bookmark];
+    [[ProfileModel sessionsInstance] removeBookmarkWithGuid:guid];
+    [[ProfileModel sessionsInstance] addBookmark:bookmark];
 
     // Change the GUID so that this session can follow a different path in life
     // than its bookmark. Changes to the bookmark will no longer affect this
     // session, and changes to this session won't affect its originating bookmark
     // (which may not evene exist any longer).
-    bookmark = [[BookmarkModel sessionsInstance] setObject:guid
+    bookmark = [[ProfileModel sessionsInstance] setObject:guid
                                                     forKey:KEY_ORIGINAL_GUID
                                                 inBookmark:bookmark];
-    guid = [BookmarkModel freshGuid];
-    [[BookmarkModel sessionsInstance] setObject:guid
+    guid = [ProfileModel freshGuid];
+    [[ProfileModel sessionsInstance] setObject:guid
                                          forKey:KEY_GUID
                                      inBookmark:bookmark];
-    [self setAddressBookEntry:[[BookmarkModel sessionsInstance] bookmarkWithGuid:guid]];
+    [self setAddressBookEntry:[[ProfileModel sessionsInstance] bookmarkWithGuid:guid]];
     return guid;
 }
 
@@ -3138,6 +3450,24 @@ static long long timeInTenthsOfSeconds(struct timeval t)
 - (NSString*)selectedText
 {
     return [TEXTVIEW selectedText];
+}
+
+- (BOOL)canSearch
+{
+    return TEXTVIEW != nil && tab_ && [tab_ realParentWindow];
+}
+
+- (BOOL)findString:(NSString *)aString
+  forwardDirection:(BOOL)direction
+      ignoringCase:(BOOL)ignoreCase
+             regex:(BOOL)regex
+        withOffset:(int)offset
+{
+    return [TEXTVIEW findString:aString
+               forwardDirection:direction
+                   ignoringCase:ignoreCase
+                          regex:regex
+                     withOffset:offset];
 }
 
 - (NSString*)unpaddedSelectedText
@@ -3265,6 +3595,226 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     return !tailFindTimer_ &&
            ![[[view findViewController] view] isHidden] &&
            [TEXTVIEW initialFindContext]->substring != nil;
+}
+
+- (void)hideSession
+{
+    [[MovePaneController sharedInstance] moveSessionToNewWindow:self
+                                                        atPoint:[[view window] convertBaseToScreen:NSMakePoint(0, 0)]];
+    [[[tab_ realParentWindow] window] miniaturize:self];
+}
+
+- (void)startTmuxMode
+{
+    for (PseudoTerminal *term in [[iTermController sharedInstance] terminals]) {
+        if ([[term uniqueTmuxControllers] count]) {
+            const char *message = "detach\n";
+            [self printTmuxMessage:@"Can't enter tmux mode: another tmux is already attached"];
+            [SCREEN crlf];
+            [self writeTaskImpl:[NSData dataWithBytes:message length:strlen(message)]];
+            return;
+        }
+    }
+
+    if (tmuxMode_ != TMUX_NONE) {
+        return;
+    }
+    tmuxMode_ = TMUX_GATEWAY;
+    tmuxGateway_ = [[TmuxGateway alloc] initWithDelegate:self];
+    tmuxController_ = [[TmuxController alloc] initWithGateway:tmuxGateway_];
+	NSSize theSize;
+	Profile *tmuxBookmark = [PTYTab tmuxBookmark];
+	theSize.width = [[tmuxBookmark objectForKey:KEY_COLUMNS] intValue];
+	theSize.height = [[tmuxBookmark objectForKey:KEY_ROWS] intValue];
+	[tmuxController_ setClientSize:theSize];
+
+    [self printTmuxMessage:@"** tmux mode started **"];
+    [SCREEN crlf];
+    [self printTmuxMessage:@"Command Menu"];
+    [self printTmuxMessage:@"----------------------------"];
+    [self printTmuxMessage:@"esc    Detach cleanly."];
+    [self printTmuxMessage:@"  X    Force-quit tmux mode."];
+    [self printTmuxMessage:@"  L    Toggle logging."];
+    [self printTmuxMessage:@"  C    Run tmux command."];
+
+    if ([[PreferencePanel sharedInstance] autoHideTmuxClientSession]) {
+        [self hideSession];
+    }
+
+    [tmuxGateway_ readTask:[TERMINAL streamData]];
+    [TERMINAL clearStream];
+}
+
+- (BOOL)isTmuxClient
+{
+    return tmuxMode_ == TMUX_CLIENT;
+}
+
+- (BOOL)isTmuxGateway
+{
+    return tmuxMode_ == TMUX_GATEWAY;
+}
+
+- (void)tmuxDetach
+{
+    if (tmuxMode_ != TMUX_GATEWAY) {
+        return;
+    }
+    [self printTmuxMessage:@"Detaching..."];
+    [tmuxGateway_ detach];
+}
+
+- (int)tmuxPane
+{
+    return tmuxPane_;
+}
+
+- (void)setTmuxPane:(int)windowPane
+{
+    tmuxPane_ = windowPane;
+    tmuxMode_ = TMUX_CLIENT;
+}
+
+- (void)setTmuxController:(TmuxController *)tmuxController
+{
+    [tmuxController_ autorelease];
+    tmuxController_ = [tmuxController retain];
+}
+
+- (void)resizeFromArrangement:(NSDictionary *)arrangement
+{
+    [self setWidth:[[arrangement objectForKey:SESSION_ARRANGEMENT_COLUMNS] intValue]
+            height:[[arrangement objectForKey:SESSION_ARRANGEMENT_ROWS] intValue]];
+}
+
+- (BOOL)isCompatibleWith:(PTYSession *)otherSession
+{
+    if (tmuxMode_ != TMUX_CLIENT && otherSession->tmuxMode_ != TMUX_CLIENT) {
+        // Non-clients are always compatible
+        return YES;
+    } else if (tmuxMode_ == TMUX_CLIENT && otherSession->tmuxMode_ == TMUX_CLIENT) {
+        // Clients are compatible with other clients from the same controller.
+        return (tmuxController_ == otherSession->tmuxController_);
+    } else {
+        // Clients are never compatible with non-clients.
+        return NO;
+    }
+}
+
+#pragma mark tmux gateway delegate methods
+// TODO (also, capture and throw away keyboard input)
+
+- (TmuxController *)tmuxController
+{
+    return tmuxController_;
+}
+
+- (void)tmuxUpdateLayoutForWindow:(int)windowId
+                           layout:(NSString *)layout
+{
+    PTYTab *tab = [tmuxController_ window:windowId];
+    if (tab) {
+        [tmuxController_ setLayoutInTab:tab toLayout:layout];
+    }
+}
+
+- (void)tmuxWindowAddedWithId:(int)windowId
+{
+    if (![tmuxController_ window:windowId]) {
+		[tmuxController_ openWindowWithId:windowId
+							  intentional:NO];
+    }
+    [tmuxController_ windowsChanged];
+}
+
+- (void)tmuxWindowClosedWithId:(int)windowId
+{
+    PTYTab *tab = [tmuxController_ window:windowId];
+    if (tab) {
+        [[tab realParentWindow] removeTab:tab];
+    }
+    [tmuxController_ windowsChanged];
+}
+
+- (void)tmuxWindowRenamedWithId:(int)windowId to:(NSString *)newName
+{
+    [tmuxController_ windowWasRenamedWithId:windowId to:newName];
+}
+
+- (void)tmuxHostDisconnected
+{
+    [tmuxController_ detach];
+
+    // Autorelease the gateway because it called this function so we can't free
+    // it immediately.
+    [tmuxGateway_ autorelease];
+    tmuxGateway_ = nil;
+    [tmuxController_ release];
+    tmuxController_ = nil;
+    [SCREEN setString:@"Detached" ascii:YES];
+    [SCREEN crlf];
+    tmuxMode_ = TMUX_NONE;
+    tmuxLogging_ = NO;
+
+    if ([[PreferencePanel sharedInstance] autoHideTmuxClientSession] &&
+        [[[tab_ realParentWindow] window] isMiniaturized]) {
+        [[[tab_ realParentWindow] window] deminiaturize:self];
+    }
+}
+
+- (void)tmuxWriteData:(NSData *)data
+{
+    if (EXIT) {
+        return;
+    }
+    TmuxLog(@"Write to tmux: \"%@\"", [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]);
+    if (tmuxLogging_) {
+        [self printTmuxMessage:[[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]];
+    }
+    [self writeTaskImpl:data];
+}
+
+- (void)tmuxReadTask:(NSData *)data
+{
+    [self readTask:data];
+}
+
+- (void)tmuxSessionChanged:(NSString *)sessionName sessionId:(int)sessionId
+{
+    [tmuxController_ sessionChangedTo:sessionName sessionId:sessionId];
+}
+
+- (void)tmuxSessionsChanged
+{
+    [tmuxController_ sessionsChanged];
+}
+
+- (void)tmuxWindowsDidChange
+{
+    [tmuxController_ windowsChanged];
+}
+
+- (void)tmuxSessionRenamed:(NSString *)newName
+{
+    [tmuxController_ sessionRenamedTo:newName];
+}
+
+- (NSSize)tmuxBookmarkSize
+{
+	NSDictionary *dict = [PTYTab tmuxBookmark];
+	return NSMakeSize([[dict objectForKey:KEY_COLUMNS] intValue],
+					  [[dict objectForKey:KEY_ROWS] intValue]);
+}
+
+- (int)tmuxNumHistoryLinesInBookmark
+{
+	NSDictionary *dict = [PTYTab tmuxBookmark];
+    if ([[dict objectForKey:KEY_UNLIMITED_SCROLLBACK] boolValue]) {
+		// 10M is close enough to infinity to be indistinguishable.
+		return 10 * 1000 * 1000;
+	} else {
+		return [[dict objectForKey:KEY_SCROLLBACK_LINES] intValue];
+	}
 }
 
 @end
@@ -3427,24 +3977,6 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     return theLocale;
 }
 
-- (BOOL)_localeIsSupported:(NSString*)theLocale
-{
-    // Keep a copy of the current locale setting for this process
-    char* backupLocale = setlocale(LC_CTYPE, NULL);
-
-    // Try to set it to the proposed locale
-    BOOL supported;
-    if (setlocale(LC_CTYPE, [theLocale UTF8String])) {
-        supported = YES;
-    } else {
-        supported = NO;
-    }
-
-    // Restore locale and return
-    setlocale(LC_CTYPE, backupLocale);
-    return supported;
-}
-
 - (NSString*)_lang
 {
     NSString* theLocale = [self _getLocale];
@@ -3467,9 +3999,11 @@ static long long timeInTenthsOfSeconds(struct timeval t)
     int len = [dvrDecoder_ length];
     DVRFrameInfo info = [dvrDecoder_ info];
     if (info.width != [SCREEN width] || info.height != [SCREEN height]) {
-        [[[self tab] realParentWindow] sessionInitiatedResize:self
-                                                        width:info.width
-                                                       height:info.height];
+        if (![liveSession_ isTmuxClient]) {
+            [[[self tab] realParentWindow] sessionInitiatedResize:self
+                                                            width:info.width
+                                                           height:info.height];
+        }
     }
     [SCREEN setFromFrame:s len:len info:info];
     [[[self tab] realParentWindow] resetTempTitle];
@@ -3542,6 +4076,51 @@ static long long timeInTenthsOfSeconds(struct timeval t)
         [tailFindTimer_ invalidate];
         tailFindTimer_ = nil;
     }
+}
+
+- (void)printTmuxMessage:(NSString *)message
+{
+    if (EXIT) {
+        return;
+    }
+    screen_char_t savedFgColor = [TERMINAL foregroundColorCode];
+    screen_char_t savedBgColor = [TERMINAL backgroundColorCode];
+    [TERMINAL setForegroundColor:ALTSEM_FG_DEFAULT
+			  alternateSemantics:YES];
+    [TERMINAL setBackgroundColor:ALTSEM_BG_DEFAULT
+			  alternateSemantics:YES];
+    [SCREEN setString:message ascii:YES];
+    [SCREEN crlf];
+    [TERMINAL setForegroundColor:savedFgColor.foregroundColor
+              alternateSemantics:savedFgColor.alternateForegroundSemantics];
+    [TERMINAL setBackgroundColor:savedBgColor.backgroundColor
+              alternateSemantics:savedBgColor.alternateBackgroundSemantics];
+}
+
+- (void)printTmuxCommandOutputToScreen:(NSString *)response
+{
+    for (NSString *aLine in [response componentsSeparatedByString:@"\n"]) {
+        aLine = [aLine stringByReplacingOccurrencesOfString:@"\r" withString:@""];
+        [self printTmuxMessage:aLine];
+    }
+}
+
+- (BOOL)_localeIsSupported:(NSString*)theLocale
+{
+    // Keep a copy of the current locale setting for this process
+    char* backupLocale = setlocale(LC_CTYPE, NULL);
+
+    // Try to set it to the proposed locale
+    BOOL supported;
+    if (setlocale(LC_CTYPE, [theLocale UTF8String])) {
+        supported = YES;
+    } else {
+        supported = NO;
+    }
+
+    // Restore locale and return
+    setlocale(LC_CTYPE, backupLocale);
+    return supported;
 }
 
 @end

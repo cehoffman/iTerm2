@@ -383,6 +383,23 @@ static NSDate* lastResizeDate_;
     }
 }
 
+- (void)drawRect:(NSRect)dirtyRect
+{
+	// Fill in background color in the area around a scrollview if it's smaller
+	// than the session view.
+	[super drawRect:dirtyRect];
+	NSColor *bgColor = [[session_ TEXTVIEW] defaultBGColor];
+	[bgColor set];
+    PTYScrollView *scrollView = [session_ SCROLLVIEW];
+	NSRect svFrame = [scrollView frame];
+	if (svFrame.size.width < self.frame.size.width) {
+		double widthDiff = self.frame.size.width - svFrame.size.width;
+		NSRectFill(NSMakeRect(self.frame.size.width - widthDiff, 0, widthDiff, self.frame.size.height));
+	}
+	if (svFrame.origin.y != 0) {
+		NSRectFill(NSMakeRect(0, 0, self.frame.size.width, svFrame.origin.y));
+	}
+}
 
 #pragma mark NSDraggingSource protocol
 
@@ -411,14 +428,23 @@ static NSDate* lastResizeDate_;
 #pragma mark NSDraggingDestination protocol
 - (NSDragOperation)draggingEntered:(id < NSDraggingInfo >)sender
 {
+    PTYSession *movingSession = [[MovePaneController sharedInstance] session];
     if ([[[sender draggingPasteboard] types] indexOfObject:@"PSMTabBarControlItemPBType"] != NSNotFound) {
         // Dragging a tab handle. Source is a PSMTabBarControl.
         PTYTab *theTab = (PTYTab *)[[[[PSMTabDragAssistant sharedDragAssistant] draggedCell] representedObject] identifier];
         if (theTab == [session_ tab] || [[theTab sessions] count] > 1) {
             return NSDragOperationNone;
         }
+        if (![[theTab activeSession] isCompatibleWith:[self session]]) {
+            // Can't have heterogeneous tmux controllers in one tab.
+            return NSDragOperationNone;
+        }
     } else if ([[MovePaneController sharedInstance] isMovingSession:[self session]]) {
+        // Moving me onto myself
         return NSDragOperationMove;
+    } else if (![movingSession isCompatibleWith:[self session]]) {
+        // We must both be non-tmux or belong to the same session.
+        return NSDragOperationNone;
     }
     NSRect frame = [self frame];
     splitSelectionView_ = [[SplitSelectionView alloc] initWithFrame:NSMakeRect(0,
@@ -488,7 +514,7 @@ static NSDate* lastResizeDate_;
     return showTitle_;
 }
 
-- (BOOL)setShowTitle:(BOOL)value
+- (BOOL)setShowTitle:(BOOL)value adjustScrollView:(BOOL)adjustScrollView
 {
     if (value == showTitle_) {
         return NO;
@@ -502,7 +528,9 @@ static NSDate* lastResizeDate_;
                                                                      self.frame.size.height - kTitleHeight,
                                                                      self.frame.size.width,
                                                                      kTitleHeight)] autorelease];
-        [title_ setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+        if (adjustScrollView) {
+            [title_ setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+        }
         title_.delegate = self;
         [self addSubview:title_];
     } else {
@@ -510,9 +538,62 @@ static NSDate* lastResizeDate_;
         [title_ removeFromSuperview];
         title_ = nil;
     }
-    [scrollView setFrame:frame];
+    if (adjustScrollView) {
+        [scrollView setFrame:frame];
+    } else {
+        [self updateTitleFrame];
+    }
     [self setTitle:[session_ name]];
     return YES;
+}
+
+- (NSSize)compactFrame
+{
+    NSSize cellSize = NSMakeSize([[session_ TEXTVIEW] charWidth], [[session_ TEXTVIEW] lineHeight]);
+    NSSize dim = NSMakeSize([session_ columns], [session_ rows]);
+    NSSize innerSize = NSMakeSize(cellSize.width * dim.width + MARGIN * 2,
+                                  cellSize.height * dim.height + VMARGIN * 2);
+    NSSize size = [NSScrollView frameSizeForContentSize:innerSize
+                                  hasHorizontalScroller:NO
+                                    hasVerticalScroller:[[session_ SCROLLVIEW] hasVerticalScroller]
+                                             borderType:[[session_ SCROLLVIEW] borderType]];
+    if (showTitle_) {
+        size.height += kTitleHeight;
+    }
+    return size;
+}
+
+- (NSSize)maximumPossibleScrollViewContentSize
+{
+    NSSize size = self.frame.size;
+    if (showTitle_) {
+        size.height -= kTitleHeight;
+    }
+    return [NSScrollView contentSizeForFrameSize:size
+                           hasHorizontalScroller:NO
+                             hasVerticalScroller:[[session_ SCROLLVIEW] hasVerticalScroller]
+                                      borderType:[[session_ SCROLLVIEW] borderType]];
+}
+
+- (void)updateTitleFrame
+{
+	NSRect aRect = [self frame];
+	NSView *scrollView = (NSView *)[session_ SCROLLVIEW];
+	if (showTitle_) {
+		[title_ setFrame:NSMakeRect(0,
+									aRect.size.height - kTitleHeight,
+									aRect.size.width,
+									kTitleHeight)];
+		[scrollView setFrameOrigin:NSMakePoint(
+			0,
+			aRect.size.height - scrollView.frame.size.height - kTitleHeight)];
+	} else {
+		[scrollView setFrameOrigin:NSMakePoint(
+			0,
+			aRect.size.height - scrollView.frame.size.height)];
+	}
+	[findView_ setFrameOrigin:NSMakePoint(aRect.size.width - [[findView_ view] frame].size.width - 30,
+										  aRect.size.height - [[findView_ view] frame].size.height)];
 }
 
 - (void)setTitle:(NSString *)title
@@ -522,6 +603,11 @@ static NSDate* lastResizeDate_;
     }
     title_.title = title;
     [title_ setNeedsDisplay:YES];
+}
+
+- (NSString *)description
+{
+    return [NSString stringWithFormat:@"sv %@ %dx%d", [NSValue valueWithRect:[self frame]], [session_ columns], [session_ rows]];
 }
 
 #pragma mark SessionTitleViewDelegate

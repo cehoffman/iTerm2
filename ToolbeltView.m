@@ -12,6 +12,8 @@
 #import "ToolWrapper.h"
 #import "ToolJobs.h"
 #import "ToolNotes.h"
+#import "iTermApplicationDelegate.h"
+#import "iTermApplication.h"
 
 @interface ToolbeltView (Private)
 
@@ -97,8 +99,11 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
         NSString *theName = [[tools_ allKeys] objectAtIndex:0];
 
         ToolWrapper *wrapper = [tools_ objectForKey:theName];
+		if ([wrapper.tool respondsToSelector:@selector(shutdown)]) {
+			[wrapper.tool shutdown];
+		}
+		[wrapper setDelegate:nil];
         [tools_ removeObjectForKey:theName];
-        [wrapper unbind];
         [wrapper removeFromSuperview];
     }
 }
@@ -121,6 +126,11 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
 + (BOOL)shouldShowTool:(NSString *)name
 {
     return [[ToolbeltView configuredTools] indexOfObject:name] != NSNotFound;
+}
+
+- (void)toggleShowToolWithName:(NSString *)theName
+{
+	[ToolbeltView toggleShouldShowTool:theName];
 }
 
 + (void)toggleShouldShowTool:(NSString *)theName
@@ -154,13 +164,13 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
 {
     ToolWrapper *wrapper = [tools_ objectForKey:theName];
     if (wrapper) {
+        [[wrapper tool] shutdown];
         [tools_ removeObjectForKey:theName];
-        [wrapper unbind];
         [wrapper removeFromSuperview];
+		[wrapper setDelegate:nil];
     } else {
         [self addToolWithName:theName];
     }
-    [self setHaveOnlyOneTool:[self haveOnlyOneTool]];
 }
 
 - (BOOL)showingToolWithName:(NSString *)theName
@@ -187,7 +197,6 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
     [wrapper setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
     [theTool setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
     [splitter_ adjustSubviews];
-    [wrapper bindCloseButton];
     [tools_ setObject:wrapper forKey:[[wrapper.name copy] autorelease]];
 }
 
@@ -196,6 +205,7 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
     ToolWrapper *wrapper = [[ToolWrapper alloc] initWithFrame:NSMakeRect(0, 0, self.frame.size.width, self.frame.size.height / MAX(1, [ToolbeltView numberOfVisibleTools ] - 1))];
     wrapper.name = toolName;
     wrapper.term = term_;
+	wrapper.delegate = self;
     Class c = [gRegisteredTools objectForKey:toolName];
     [self addTool:[[[c alloc] initWithFrame:NSMakeRect(0, 0, wrapper.container.frame.size.width, wrapper.container.frame.size.height)] autorelease]
         toWrapper:wrapper];
@@ -210,6 +220,14 @@ static NSString *kToolbeltPrefKey = @"ToolbeltTools";
 - (void)setHaveOnlyOneTool:(BOOL)value
 {
     // For KVO
+}
+
+#pragma mark - ToolWrapperDelegate
+
+- (void)hideToolbelt
+{
+	iTermApplicationDelegate *itad = [[iTermApplication sharedApplication] delegate];
+	[itad toggleToolbelt:self];
 }
 
 - (BOOL)haveOnlyOneTool

@@ -362,15 +362,18 @@ static PSMTabDragAssistant *sharedDragAssistant = nil;
             }
         }
 
-        [[[self destinationTabBar] tabView] insertTabViewItem:newTabViewItem atIndex:insertIndex];
-        insertIndex = [[[self destinationTabBar] tabView] indexOfTabViewItem:newTabViewItem];
-        // I'm not sure why, but calling -bindPropertiesForCell:andTabViewItem:
-        // here causes there to be an extra binding. It seems to have its
-        // bindings set when it's added to the control. Other paths through this
-        // function do explicitly set the bindings.
+	// If newTabViewItem is nil then simply cancel the drop.
+        if (newTabViewItem) {
+            [[[self destinationTabBar] tabView] insertTabViewItem:newTabViewItem atIndex:insertIndex];
+            insertIndex = [[[self destinationTabBar] tabView] indexOfTabViewItem:newTabViewItem];
+            // I'm not sure why, but calling -bindPropertiesForCell:andTabViewItem:
+            // here causes there to be an extra binding. It seems to have its
+            // bindings set when it's added to the control. Other paths through this
+            // function do explicitly set the bindings.
 
-        // Select the newly moved item in the destination tab view.
-        [[[self destinationTabBar] tabView] selectTabViewItem:newTabViewItem];
+            // Select the newly moved item in the destination tab view.
+            [[[self destinationTabBar] tabView] selectTabViewItem:newTabViewItem];
+        }
     } else {
         [[[self destinationTabBar] cells] replaceObjectAtIndex:destinationIndex withObject:[self draggedCell]];
         [[self draggedCell] setControlView:[self destinationTabBar]];
@@ -461,9 +464,10 @@ static PSMTabDragAssistant *sharedDragAssistant = nil;
 
         //split off the dragged tab into a new window
         if ([self destinationTabBar] == nil &&
-                sourceDelegate && [sourceDelegate respondsToSelector:@selector(tabView:shouldDropTabViewItem:inTabBar:)] &&
-                [sourceDelegate tabView:[[self sourceTabBar] tabView] shouldDropTabViewItem:[[self draggedCell] representedObject] inTabBar:nil] &&
-                [sourceDelegate respondsToSelector:@selector(tabView:newTabBarForDraggedTabViewItem:atPoint:)]) {
+            sourceDelegate && [sourceDelegate respondsToSelector:@selector(tabView:shouldDropTabViewItem:inTabBar:)] &&
+            [sourceDelegate tabView:[[self sourceTabBar] tabView] shouldDropTabViewItem:[[self draggedCell] representedObject] inTabBar:nil] &&
+            [sourceDelegate respondsToSelector:@selector(tabView:newTabBarForDraggedTabViewItem:atPoint:)]) {
+
             PSMTabBarControl *control = [sourceDelegate tabView:[[self sourceTabBar] tabView] newTabBarForDraggedTabViewItem:[[self draggedCell] representedObject] atPoint:aPoint];
 
             if (control) {
@@ -498,6 +502,7 @@ static PSMTabDragAssistant *sharedDragAssistant = nil;
             } else {
                 NSLog(@"Delegate returned no control to add to.");
                 [[[self sourceTabBar] cells] insertObject:[self draggedCell] atIndex:[self draggedCellIndex]];
+                [[[self sourceTabBar] window] setAlphaValue:1];  // Make the window visible again.
             }
 
         } else {

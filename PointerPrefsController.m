@@ -18,6 +18,7 @@ static NSString *kCommandKeyChar = @"c";
 static NSString *kOptionKeyChar = @"o";
 static NSString *kShiftKeyChar = @"s";
 static NSString *kControlKeyChar = @"^";
+
 #define kLeftButton 0
 #define kRightButton 1
 #define kMiddleButton 2
@@ -44,6 +45,7 @@ NSString *kPasteFromSelectionPointerAction = @"kPasteFromSelectionPointerAction"
 NSString *kOpenTargetPointerAction = @"kOpenTargetPointerAction";
 NSString *kOpenTargetInBackgroundPointerAction = @"kOpenTargetInBackgroundPointerAction";
 NSString *kSmartSelectionPointerAction = @"kSmartSelectionPointerAction";
+NSString *kSmartSelectionIgnoringNewlinesPointerAction = @"kSmartSelectionIgnoringNewlinesPointerAction";
 NSString *kContextMenuPointerAction = @"kContextMenuPointerAction";
 NSString *kNextTabPointerAction = @"kNextTabPointerAction";
 NSString *kPrevTabPointerAction = @"kPrevTabPointerAction";
@@ -64,6 +66,8 @@ NSString *kNewHorizontalSplitWithProfilePointerAction = @"kNewHorizontalSplitWit
 NSString *kSelectNextPanePointerAction = @"kSelectNextPanePointerAction";
 NSString *kSelectPreviousPanePointerAction = @"kSelectPreviousPanePointerAction";
 NSString *kExtendSelectionPointerAction = @"kExtendSelectionPointerAction";
+
+NSString *kPointerPrefsChangedNotification = @"kPointerPrefsChangedNotification";
 
 typedef enum {
     kNoArg,
@@ -109,6 +113,7 @@ typedef enum {
 + (int)tagForGestureIdentifier:(NSString *)ident;
 - (BOOL)okShouldBeEnabled;
 - (void)editKey:(NSString *)key;
++ (BOOL)keyIsThreeFingerTap:(NSString *)key;
 @end
 
 @implementation PointerPrefsController
@@ -179,6 +184,16 @@ typedef enum {
 + (BOOL)keyIsButton:(NSString *)key
 {
     return [key hasPrefix:kButtonSchema];
+}
+
++ (BOOL)keyIsThreeFingerTap:(NSString *)key
+{
+    if (![key hasPrefix:kGestureSchema]) {
+        return NO;
+    }
+    NSArray *components = [PointerPrefsController gestureKeyComponents:key];
+    NSString *gesture = [components objectAtIndex:1];
+    return [gesture isEqualToString:kThreeFingerClickGesture];
 }
 
 + (NSArray *)buttonKeyComponents:(NSString *)key
@@ -360,6 +375,7 @@ typedef enum {
                            @"Open URL/Semantic History", kOpenTargetPointerAction,
                            @"Open URL in background", kOpenTargetInBackgroundPointerAction,
                            @"Smart Selection", kSmartSelectionPointerAction,
+                           @"Smart Selection Ignoring Newlines", kSmartSelectionIgnoringNewlinesPointerAction,
                            @"Open Context Menu", kContextMenuPointerAction,
                            @"Next Tab", kNextTabPointerAction,
                            @"Previous Tab", kPrevTabPointerAction,
@@ -441,7 +457,7 @@ typedef enum {
                 return [name stringByReplacingOccurrencesOfString:@"…"
                                                        withString:[NSString stringWithFormat:@" \"%@\"", argument]];
             case kProfileArg: {
-                NSString *bookmarkName = [[[BookmarkModel sharedInstance] bookmarkWithGuid:argument] objectForKey:KEY_NAME];
+                NSString *bookmarkName = [[[ProfileModel sharedInstance] bookmarkWithGuid:argument] objectForKey:KEY_NAME];
                 if (!bookmarkName) {
                     bookmarkName = @"?";
                 }
@@ -544,7 +560,7 @@ typedef enum {
                 }
             }
         }
-        defaultDict = temp;
+        defaultDict = [temp retain];
     }
     return defaultDict;
 }
@@ -562,6 +578,8 @@ typedef enum {
 + (void)setSettings:(NSDictionary *)newSettings
 {
     [[NSUserDefaults standardUserDefaults] setObject:newSettings forKey:kPointerActionsKey];
+    [[NSNotificationCenter defaultCenter] postNotificationName:kPointerPrefsChangedNotification
+                                                        object:nil];
 }
 
 + (NSArray *)sortedKeys
@@ -647,6 +665,16 @@ typedef enum {
     key = [PointerPrefsController keyForGesture:gesture
                                       modifiers:modMask];
     return [[[PointerPrefsController settings] objectForKey:key] objectForKey:kArgumentKey];
+}
+
++ (BOOL)haveThreeFingerTapEvents
+{
+    for (NSString *key in [PointerPrefsController sortedKeys]) {
+        if ([PointerPrefsController keyIsThreeFingerTap:key]) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 #pragma mark NSTableViewDataSource
@@ -931,7 +959,7 @@ typedef enum {
     } else if (![editArgumentButton_ isHidden]) {
         if ([PointerPrefsController argumentTypeForAction:theAction] == kProfileArg) {
             NSString *profileName = [[editArgumentButton_ selectedItem] title];
-            NSString *guid = [[[BookmarkModel sharedInstance] bookmarkWithName:profileName] objectForKey:KEY_GUID];
+            NSString *guid = [[[ProfileModel sharedInstance] bookmarkWithName:profileName] objectForKey:KEY_GUID];
             if (guid) {
                 [newValue setObject:guid forKey:kArgumentKey];
             } else {

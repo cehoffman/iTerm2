@@ -28,11 +28,11 @@
  **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#import <iTerm/iTerm.h>
-#import <iTerm/PTYWindow.h>
-#import <iTerm/PreferencePanel.h>
-#import <iTerm/PseudoTerminal.h>
-#import <iTerm/iTermController.h>
+#import "iTerm.h"
+#import "PTYWindow.h"
+#import "PreferencePanel.h"
+#import "PseudoTerminal.h"
+#import "iTermController.h"
 // This is included because the blurring code uses undocumented APIs to do its thing.
 #import <CGSInternal.h>
 
@@ -50,9 +50,7 @@
 
 - (void) dealloc
 {
-#if DEBUG_METHOD_ALLOC
-    NSLog(@"%s: 0x%x", __PRETTY_FUNCTION__, self);
-#endif
+    [restoreState_ release];
 
     [super dealloc];
 
@@ -78,6 +76,7 @@
 
     return self;
 }
+
 typedef CGError CGSSetWindowBackgroundBlurRadiusFunction(CGSConnectionID cid, CGSWindowID wid, NSUInteger blur);
 
 static void *GetFunctionByName(NSString *library, char *func) {
@@ -105,6 +104,21 @@ static CGSSetWindowBackgroundBlurRadiusFunction* GetCGSSetWindowBackgroundBlurRa
     return function;
 }
 
+- (void)encodeRestorableStateWithCoder:(NSCoder *)coder
+{
+    // This gives a warning, but this method won't be called except in 10.7 where this
+    // method does exist in our superclass. The only way to avoid the warning
+    // is to do some really gnarly stuff. See here for more:
+    // http://www.cocoabuilder.com/archive/cocoa/214903-using-performselector-on-super.html
+    [super encodeRestorableStateWithCoder:coder];
+    [coder encodeObject:restoreState_ forKey:@"ptyarrangement"];
+}
+
+- (void)setRestoreState:(NSObject *)restoreState {
+    [restoreState_ autorelease];
+    restoreState_ = [restoreState retain];
+}
+
 - (void)enableBlur:(double)radius
 {
 #if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_4
@@ -121,7 +135,7 @@ static CGSSetWindowBackgroundBlurRadiusFunction* GetCGSSetWindowBackgroundBlurRa
         return;
     }
     CGSSetWindowBackgroundBlurRadiusFunction* function = GetCGSSetWindowBackgroundBlurRadiusFunction();
-    if (function) {
+    if (IsLionOrLater() && function) {
         // If CGSSetWindowBackgroundBlurRadius() is available (10.6 and up) use it because it works
         // right in Exposé.
         function(con, [self windowNumber], (int)radius);
@@ -152,7 +166,7 @@ static CGSSetWindowBackgroundBlurRadiusFunction* GetCGSSetWindowBackgroundBlurRa
     }
 
     CGSSetWindowBackgroundBlurRadiusFunction* function = GetCGSSetWindowBackgroundBlurRadiusFunction();
-    if (function) {
+    if (IsLionOrLater() && function) {
         function(con, [self windowNumber], 0);
     } else if (blurFilter) {
         CGSRemoveWindowFilter(con, (CGSWindowID)[self windowNumber], blurFilter);
@@ -164,12 +178,19 @@ static CGSSetWindowBackgroundBlurRadiusFunction* GetCGSSetWindowBackgroundBlurRa
 
 - (void)toggleFullScreen:(id)sender
 {
-    // This is a way of calling [super toggleFullScreen:] that doesn't give a warning if
-    // the method doesn't exist (it's new in 10.7) but we build against 10.5 sdk.
-    IMP functionPointer = [NSWindow instanceMethodForSelector:_cmd];
-    isTogglingLionFullScreen_ = true;
-    functionPointer(self, _cmd, sender);
-    isTogglingLionFullScreen_ = false;
+    if (![[PreferencePanel sharedInstance] lionStyleFullscreen]) {
+        // The user must have clicked on the toolbar arrow, but the pref is set
+        // to use traditional fullscreen.
+        [[self delegate] performSelector:@selector(toggleTraditionalFullScreenMode)
+                              withObject:nil];
+    } else {
+        // This is a way of calling [super toggleFullScreen:] that doesn't give a warning if
+        // the method doesn't exist (it's new in 10.7) but we build against 10.5 sdk.
+        IMP functionPointer = [NSWindow instanceMethodForSelector:_cmd];
+        isTogglingLionFullScreen_ = true;
+        functionPointer(self, _cmd, sender);
+        isTogglingLionFullScreen_ = false;
+    }
 }
 
 - (BOOL)isTogglingLionFullScreen

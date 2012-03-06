@@ -95,6 +95,9 @@ void DebugLog(NSString* value);
     // Cross app request forgery prevention token. Get this with applescript and then include
     // in a URI request.
     NSString *token_;
+
+    // Set to YES when applicationDidFinishLaunching: is called.
+    BOOL finishedLaunching_;
 }
 
 - (void)awakeFromNib;
@@ -132,6 +135,9 @@ void DebugLog(NSString* value);
 
     // About window
 - (IBAction)showAbout:(id)sender;
+
+- (IBAction)makeDefaultTerminal:(id)sender;
+- (IBAction)unmakeDefaultTerminal:(id)sender;
 
 - (IBAction)saveWindowArrangement:(id)sender;
 - (IBAction)loadWindowArrangement:(id)sender;

@@ -31,14 +31,14 @@
 #define DEBUG_ALLOC           0
 #define DEBUG_METHOD_TRACE    0
 
-#import <iTerm/iTermController.h>
-#import <iTerm/PreferencePanel.h>
-#import <iTerm/PseudoTerminal.h>
-#import <iTerm/PTYSession.h>
-#import <iTerm/VT100Screen.h>
-#import <iTerm/NSStringITerm.h>
-#import <iTerm/ITAddressBookMgr.h>
-#import <iTerm/iTermGrowlDelegate.h>
+#import "iTermController.h"
+#import "PreferencePanel.h"
+#import "PseudoTerminal.h"
+#import "PTYSession.h"
+#import "VT100Screen.h"
+#import "NSStringITerm.h"
+#import "ITAddressBookMgr.h"
+#import <iTermGrowlDelegate.h>
 #import "PasteboardHistory.h"
 #import <Carbon/Carbon.h>
 #import "iTermApplicationDelegate.h"
@@ -46,14 +46,14 @@
 #import "UKCrashReporter/UKCrashReporter.h"
 #import "PTYTab.h"
 #import "iTermKeyBindingMgr.h"
-#import "iTerm/PseudoTerminal.h"
+#import "PseudoTerminal.h"
 #import "iTermExpose.h"
 #import "FutureMethods.h"
 #import "GTMCarbonEvent.h"
 #import "iTerm.h"
 #import "WindowArrangements.h"
 
-#define HOTKEY_WINDOW_VERBOSE_LOGGING
+//#define HOTKEY_WINDOW_VERBOSE_LOGGING
 #ifdef HOTKEY_WINDOW_VERBOSE_LOGGING
 #define HKWLog NSLog
 #else
@@ -241,7 +241,7 @@ static BOOL initDone = NO;
 
 - (void) newSessionInTabAtIndex: (id) sender
 {
-    Bookmark* bookmark = [[BookmarkModel sharedInstance] bookmarkWithGuid:[sender representedObject]];
+    Profile* bookmark = [[ProfileModel sharedInstance] bookmarkWithGuid:[sender representedObject]];
     if (bookmark) {
         [self launchBookmark:bookmark inTerminal:FRONT];
     }
@@ -264,7 +264,7 @@ static BOOL initDone = NO;
 
 - (void)newSessionInWindowAtIndex: (id) sender
 {
-    Bookmark* bookmark = [[BookmarkModel sharedInstance] bookmarkWithGuid:[sender representedObject]];
+    Profile* bookmark = [[ProfileModel sharedInstance] bookmarkWithGuid:[sender representedObject]];
     if (bookmark) {
         [self launchBookmark:bookmark inTerminal:nil];
     }
@@ -278,7 +278,7 @@ static BOOL initDone = NO;
 
 - (IBAction)newSessionWithSameProfile:(id)sender
 {
-    Bookmark *bookmark = nil;
+    Profile *bookmark = nil;
     if (FRONT) {
         bookmark = [[FRONT currentSession] addressBookEntry];
     }
@@ -572,7 +572,7 @@ static BOOL initDone = NO;
     return (tmp);
 }
 
-- (void)_addBookmark:(Bookmark*)bookmark
+- (void)_addBookmark:(Profile*)bookmark
               toMenu:(NSMenu*)aMenu
               target:(id)aTarget
        withShortcuts:(BOOL)withShortcuts
@@ -629,8 +629,8 @@ static BOOL initDone = NO;
     if ([tag isEqualToString:@"bonjour"]) {
         MAX_MENU_ITEMS = 50;
     }
-    for (int i = 0; i < [[BookmarkModel sharedInstance] numberOfBookmarks]; ++i) {
-        Bookmark* bookmark = [[BookmarkModel sharedInstance] bookmarkAtIndex:i];
+    for (int i = 0; i < [[ProfileModel sharedInstance] numberOfBookmarks]; ++i) {
+        Profile* bookmark = [[ProfileModel sharedInstance] profileAtIndex:i];
         NSArray* tags = [bookmark objectForKey:KEY_TAGS];
         for (int j = 0; j < [tags count]; ++j) {
             if ([tag localizedCaseInsensitiveCompare:[tags objectAtIndex:j]] == NSOrderedSame) {
@@ -647,8 +647,8 @@ static BOOL initDone = NO;
             }
         }
     }
-    if ([[BookmarkModel sharedInstance] numberOfBookmarks] > MAX_MENU_ITEMS) {
-        int overflow = [[BookmarkModel sharedInstance] numberOfBookmarks] - MAX_MENU_ITEMS;
+    if ([[ProfileModel sharedInstance] numberOfBookmarks] > MAX_MENU_ITEMS) {
+        int overflow = [[ProfileModel sharedInstance] numberOfBookmarks] - MAX_MENU_ITEMS;
         NSMenuItem* overflowItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"[%d profiles not shown]", overflow]
                                                            action:nil
                                                     keyEquivalent:@""];
@@ -701,7 +701,7 @@ static BOOL initDone = NO;
     for (NSMenuItem* item in [parent itemArray]) {
         if (![item isSeparatorItem] && ![item submenu]) {
             NSString* guid = [item representedObject];
-            Bookmark* bookmark = [[BookmarkModel sharedInstance] bookmarkWithGuid:guid];
+            Profile* bookmark = [[ProfileModel sharedInstance] bookmarkWithGuid:guid];
             if (bookmark) {
                 [self launchBookmark:bookmark inTerminal:nil];
             }
@@ -720,15 +720,15 @@ static BOOL initDone = NO;
 {
     BOOL doOpen = usedGuids == nil;
     if (doOpen) {
-        usedGuids = [NSMutableSet setWithCapacity:[[BookmarkModel sharedInstance] numberOfBookmarks]];
-        bookmarks = [NSMutableArray arrayWithCapacity:[[BookmarkModel sharedInstance] numberOfBookmarks]];
+        usedGuids = [NSMutableSet setWithCapacity:[[ProfileModel sharedInstance] numberOfBookmarks]];
+        bookmarks = [NSMutableArray arrayWithCapacity:[[ProfileModel sharedInstance] numberOfBookmarks]];
     }
 
     PseudoTerminal* term = newWindow ? nil : [self currentTerminal];
     for (NSMenuItem* item in [parent itemArray]) {
         if (![item isSeparatorItem] && ![item submenu] && ![item isAlternate]) {
             NSString* guid = [item representedObject];
-            Bookmark* bookmark = [[BookmarkModel sharedInstance] bookmarkWithGuid:guid];
+            Profile* bookmark = [[ProfileModel sharedInstance] bookmarkWithGuid:guid];
             if (bookmark) {
                 if (![usedGuids containsObject:guid]) {
                     [usedGuids addObject:guid];
@@ -742,7 +742,7 @@ static BOOL initDone = NO;
     }
 
     if (doOpen) {
-        for (Bookmark* bookmark in bookmarks) {
+        for (Profile* bookmark in bookmarks) {
             if (!term) {
                 PTYSession* session = [self launchBookmark:bookmark inTerminal:nil];
                 term = [[session tab] realParentWindow];
@@ -775,10 +775,10 @@ static BOOL initDone = NO;
     params.alternateOpenAllSelector = @selector(newSessionsInWindow:);
     params.target = self;
 
-    BookmarkModel* bm = [BookmarkModel sharedInstance];
+    ProfileModel* bm = [ProfileModel sharedInstance];
     int N = [bm numberOfBookmarks];
     for (int i = 0; i < N; i++) {
-        Bookmark* b = [bm bookmarkAtIndex:i];
+        Profile* b = [bm profileAtIndex:i];
         [bm addBookmark:b
                  toMenu:aMenu
          startingAtItem:startingAt
@@ -801,7 +801,7 @@ static BOOL initDone = NO;
     [FRONT irAdvance:dir];
 }
 
-+ (void)switchToSpaceInBookmark:(Bookmark*)aDict
++ (void)switchToSpaceInBookmark:(Profile*)aDict
 {
     if ([aDict objectForKey:KEY_SPACE]) {
         int spaceNum = [[aDict objectForKey:KEY_SPACE] intValue];
@@ -823,7 +823,7 @@ static BOOL initDone = NO;
     }
 }
 
-- (int)_windowTypeForBookmark:(Bookmark*)aDict
+- (int)_windowTypeForBookmark:(Profile*)aDict
 {
     if ([aDict objectForKey:KEY_WINDOW_TYPE]) {
         int windowType = [[aDict objectForKey:KEY_WINDOW_TYPE] intValue];
@@ -839,6 +839,34 @@ static BOOL initDone = NO;
     }
 }
 
+- (Profile *)defaultBookmark
+{
+    Profile *aDict = [[ProfileModel sharedInstance] defaultBookmark];
+    if (!aDict) {
+        NSMutableDictionary* temp = [[[NSMutableDictionary alloc] init] autorelease];
+        [ITAddressBookMgr setDefaultsInBookmark:temp];
+        [temp setObject:[ProfileModel freshGuid] forKey:KEY_GUID];
+        aDict = temp;
+    }
+    return aDict;
+}
+
+- (PseudoTerminal *)openWindow
+{
+    Profile *bookmark = [self defaultBookmark];
+    [iTermController switchToSpaceInBookmark:bookmark];
+    PseudoTerminal *term;
+    term = [[[PseudoTerminal alloc] initWithSmartLayout:YES
+                                             windowType:WINDOW_TYPE_NORMAL
+                                                 screen:[bookmark objectForKey:KEY_SCREEN] ? [[bookmark objectForKey:KEY_SCREEN] intValue] : -1
+                                               isHotkey:NO] autorelease];
+	if ([[bookmark objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
+		[term hideAfterOpening];
+	}
+    [self addInTerminals:term];
+    return term;
+}
+
 // Executes an addressbook command in new window or tab
 - (id)launchBookmark:(NSDictionary *)bookmarkData
                inTerminal:(PseudoTerminal *)theTerm
@@ -849,17 +877,12 @@ static BOOL initDone = NO;
 
     aDict = bookmarkData;
     if (aDict == nil) {
-        aDict = [[BookmarkModel sharedInstance] defaultBookmark];
-        if (!aDict) {
-            NSMutableDictionary* temp = [[[NSMutableDictionary alloc] init] autorelease];
-            [ITAddressBookMgr setDefaultsInBookmark:temp];
-            [temp setObject:[BookmarkModel freshGuid] forKey:KEY_GUID];
-            aDict = temp;
-        }
+        aDict = [self defaultBookmark];
     }
 
     // Where do we execute this command?
     BOOL toggle = NO;
+    BOOL makeKey = NO;
     if (theTerm == nil) {
         [iTermController switchToSpaceInBookmark:aDict];
         int windowType = [self _windowTypeForBookmark:aDict];
@@ -875,6 +898,11 @@ static BOOL initDone = NO;
                                                  windowType:windowType
                                                      screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1
                                                    isHotkey:disableLionFullscreen] autorelease];
+		if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
+			[term hideAfterOpening];
+		} else {
+            makeKey = YES;
+        }
         [self addInTerminals:term];
         if (disableLionFullscreen) {
             // See comment above regarding hotkey windows.
@@ -885,6 +913,7 @@ static BOOL initDone = NO;
         }
     } else {
         term = theTerm;
+        makeKey = YES;
     }
 
     PTYSession* session = [term addNewSession:aDict];
@@ -895,6 +924,8 @@ static BOOL initDone = NO;
     // that the new window is on top of all other apps' windows. For some reason,
     // makeKeyAndOrderFront does nothing.
     if (![[term window] isKeyWindow]) {
+        [NSApp activateIgnoringOtherApps:YES];
+        [[term window] makeKeyAndOrderFront:nil];
         [NSApp arrangeInFront:self];
     }
 
@@ -916,11 +947,11 @@ static BOOL initDone = NO;
 
     aDict = bookmarkData;
     if (aDict == nil) {
-        aDict = [[BookmarkModel sharedInstance] defaultBookmark];
+        aDict = [[ProfileModel sharedInstance] defaultBookmark];
         if (!aDict) {
             NSMutableDictionary* temp = [[[NSMutableDictionary alloc] init] autorelease];
             [ITAddressBookMgr setDefaultsInBookmark:temp];
-            [temp setObject:[BookmarkModel freshGuid] forKey:KEY_GUID];
+            [temp setObject:[ProfileModel freshGuid] forKey:KEY_GUID];
             aDict = temp;
         }
     }
@@ -932,6 +963,9 @@ static BOOL initDone = NO;
         term = [[[PseudoTerminal alloc] initWithSmartLayout:YES
                                                  windowType:[self _windowTypeForBookmark:aDict]
                                                      screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1] autorelease];
+		if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
+			[term hideAfterOpening];
+		}
         [self addInTerminals:term];
         toggle = (([term windowType] == WINDOW_TYPE_FULL_SCREEN) ||
                   ([term windowType] == WINDOW_TYPE_LION_FULL_SCREEN));
@@ -961,16 +995,18 @@ static BOOL initDone = NO;
     // Automatically fill in ssh command if command is exactly equal to $$ or it's a login shell.
     BOOL ignore;
     if (aDict == nil ||
-        [[ITAddressBookMgr bookmarkCommand:aDict isLoginSession:&ignore] isEqualToString:@"$$"] ||
+		[[ITAddressBookMgr bookmarkCommand:aDict
+							isLoginSession:&ignore
+							 forObjectType:objectType] isEqualToString:@"$$"] ||
         ![[aDict objectForKey:KEY_CUSTOM_COMMAND] isEqualToString:@"Yes"]) {
-        Bookmark* prototype = aDict;
+        Profile* prototype = aDict;
         if (!prototype) {
-            prototype = [[BookmarkModel sharedInstance] defaultBookmark];
+            prototype = [[ProfileModel sharedInstance] defaultBookmark];
         }
         if (!prototype) {
             NSMutableDictionary* temp = [[[NSMutableDictionary alloc] init] autorelease];
             [ITAddressBookMgr setDefaultsInBookmark:temp];
-            [temp setObject:[BookmarkModel freshGuid] forKey:KEY_GUID];
+            [temp setObject:[ProfileModel freshGuid] forKey:KEY_GUID];
             prototype = temp;
         }
 
@@ -1022,6 +1058,9 @@ static BOOL initDone = NO;
         term = [[[PseudoTerminal alloc] initWithSmartLayout:YES
                                                  windowType:[self _windowTypeForBookmark:aDict]
                                                      screen:[aDict objectForKey:KEY_SCREEN] ? [[aDict objectForKey:KEY_SCREEN] intValue] : -1] autorelease];
+		if ([[aDict objectForKey:KEY_HIDE_AFTER_OPENING] boolValue]) {
+			[term hideAfterOpening];
+		}
         [self addInTerminals: term];
         toggle = (([term windowType] == WINDOW_TYPE_FULL_SCREEN) ||
                   ([term windowType] == WINDOW_TYPE_LION_FULL_SCREEN));
@@ -1241,6 +1280,7 @@ static void RollInHotkeyTerm(PseudoTerminal* term)
     rollingIn_ = NO;
     PseudoTerminal* term = GetHotkeyWindow();
     [[term window] makeKeyAndOrderFront:nil];
+    [[term window] makeFirstResponder:[[term currentSession] TEXTVIEW]];
 }
 
 // http://www.cocoadev.com/index.pl?DeterminingOSVersion
@@ -1291,7 +1331,7 @@ static BOOL OpenHotkeyWindow()
 {
     HKWLog(@"Open visor");
     iTermController* cont = [iTermController sharedInstance];
-    Bookmark* bookmark = [[PreferencePanel sharedInstance] hotkeyBookmark];
+    Profile* bookmark = [[PreferencePanel sharedInstance] hotkeyBookmark];
     if (bookmark) {
         if ([[bookmark objectForKey:KEY_WINDOW_TYPE] intValue] == WINDOW_TYPE_LION_FULL_SCREEN) {
             // Lion fullscreen doesn't make sense with hotkey windows. Change

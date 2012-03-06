@@ -29,9 +29,9 @@
 
 #include <wctype.h>
 #import "Autocomplete.h"
-#import "iTerm/iTermController.h"
-#import "iTerm/VT100Screen.h"
-#import "iTerm/PTYTextView.h"
+#import "iTermController.h"
+#import "VT100Screen.h"
+#import "PTYTextView.h"
 #import "LineBuffer.h"
 #import "PasteboardHistory.h"
 #import "iTermApplicationDelegate.h"
@@ -564,6 +564,10 @@ const int kMaxResultContextWords = 4;
 
         if (!more_ && [findResults_ count] == 0) {
             AcLog(@"no more and no unprocessed results");
+            if (populateTimer_) {
+               [populateTimer_ invalidate];
+               populateTimer_ = nil;
+            }
             break;
         }
 

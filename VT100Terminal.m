@@ -28,10 +28,10 @@
  **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#import <iTerm/VT100Terminal.h>
-#import <iTerm/PTYSession.h>
-#import <iTerm/VT100Screen.h>
-#import <iTerm/NSStringITerm.h>
+#import "VT100Terminal.h"
+#import "PTYSession.h"
+#import "VT100Screen.h"
+#import "NSStringITerm.h"
 #import "iTermApplicationDelegate.h"
 #import "ITAddressBookMgr.h"
 #import "PTYTab.h"
@@ -151,7 +151,7 @@ static size_t getCSIParam(unsigned char *, size_t, CSIParam *, VT100Screen *);
 static VT100TCC decode_csi(unsigned char *, size_t, size_t *,VT100Screen *);
 static VT100TCC decode_xterm(unsigned char *, size_t, size_t *,NSStringEncoding);
 static VT100TCC decode_ansi(unsigned char *,size_t, size_t *,VT100Screen *);
-static VT100TCC decode_other(unsigned char *, size_t, size_t *);
+static VT100TCC decode_other(unsigned char *, size_t, size_t *, NSStringEncoding);
 static VT100TCC decode_control(unsigned char *, size_t, size_t *,NSStringEncoding,VT100Screen *);
 static int decode_utf8_char(unsigned char *, size_t, unsigned int *);
 static VT100TCC decode_utf8(unsigned char *, size_t, size_t *);
@@ -179,6 +179,14 @@ static BOOL isANSI(unsigned char *code, size_t len)
 {
     // Currently, we only support esc-c as an ANSI code (other ansi codes are CSI).
     if (len >= 2 && code[0] == ESC && code[1] == 'c') {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL isUNDERSCORE(unsigned char *code, size_t len)
+{
+    if (len >= 2 && code[0] == ESC && code[1] == '_') {
         return YES;
     }
     return NO;
@@ -692,6 +700,53 @@ static VT100TCC decode_csi(unsigned char *datap,
     return result;
 }
 
+static VT100TCC decode_underscore(unsigned char *datap,
+                                  size_t datalen,
+                                  size_t *rmlen,
+                                  NSStringEncoding enc)
+{
+    VT100TCC result;
+    result.type = VT100_WAIT;
+    // Can assume we have "ESC _" so skip past that.
+    datap += 2;
+    datalen -= 2;
+    *rmlen=2;
+    if (datalen > 0) {
+        int i;
+        BOOL found = NO;
+        // Search for esc \ terminator.
+        for (i = 0; i < datalen; i++) {
+            if (i > 0 && datap[i - 1] == ESC && datap[i] == '\\') {
+                // Found esc \. Grab text from datap to char before esc and
+                // save in result.u.string.
+                NSData *data = [NSData dataWithBytes:datap length:i - 1];
+                result.u.string = [[[NSString alloc] initWithData:data
+                                                         encoding:enc] autorelease];
+                // Consume everything up to the backslash
+                (*rmlen) += i + 1;
+                found = YES;
+                break;
+            } else if (i > 0 && datap[i - 1] == ESC) {
+                // Stop on ESC <anything> to avoid getting stuck after a broken escape code
+                result.type = VT100_NOTSUPPORT;
+                return result;
+            }
+        }
+
+        if (found && [result.u.string hasPrefix:@"tmux"]) {
+            if ([result.u.string isEqualToString:@"tmux0.4"]) {
+                result.type = UNDERSCORE_TMUX1;
+			} else if ([result.u.string hasPrefix:@"tmux"]) {
+				result.type = UNDERSCORE_TMUX_UNSUPPORTED;
+            } else {
+                result.type = VT100_NOTSUPPORT;
+            }
+        } else if (found) {
+            result.type = VT100_NOTSUPPORT;
+        }
+    }
+    return result;
+}
 
 static VT100TCC decode_xterm(unsigned char *datap,
                              size_t datalen,
@@ -838,7 +893,8 @@ static VT100TCC decode_xterm(unsigned char *datap,
 
 static VT100TCC decode_other(unsigned char *datap,
                              size_t datalen,
-                             size_t *rmlen)
+                             size_t *rmlen,
+                             NSStringEncoding enc)
 {
     VT100TCC result;
     int c1, c2, c3;
@@ -958,6 +1014,75 @@ static VT100TCC decode_other(unsigned char *datap,
             result.type = VT100CSI_RIS;
             *rmlen = 2;
             break;
+
+        case 'k':
+            // The screen term uses <esc>k<title><cr|esc\> to set the title.
+            if (datalen > 0) {
+                int i;
+                BOOL found = NO;
+                // Search for esc or newline terminator.
+                for (i = 2; i < datalen; i++) {
+                    BOOL isTerminator = NO;
+                    if (datap[i] == ESC && i + 1 == datalen) {
+                        break;
+                    } else if (datap[i] == ESC && datap[i + 1] == '\\') {
+                        i++;  // cause the backslash to be consumed below
+                        isTerminator = YES;
+                    } else if (datap[i] == '\n' || datap[i] == '\r') {
+                        isTerminator = YES;
+                    }
+                    if (isTerminator) {
+                        // Found terminator. Grab text from datap to char before it
+                        // save in result.u.string.
+                        NSData *data = [NSData dataWithBytes:datap + 2 length:i - 2];
+                        result.u.string = [[[NSString alloc] initWithData:data
+                                                                 encoding:enc] autorelease];
+                        // Consume everything up to the terminator
+                        *rmlen = i + 1;
+                        found = YES;
+                        break;
+                    }
+                }
+                if (found) {
+                    if (result.u.string.length == 0) {
+                        // Ignore 0-length titles to avoid getting bitten by a screen
+                        // feature/hack described here: 
+                        // http://www.gnu.org/software/screen/manual/screen.html#Dynamic-Titles
+                        //
+                        // screen has a shell-specific heuristic that is enabled by setting the
+                        // window's name to search|name and arranging to have a null title 
+                        // escape-sequence output as a part of your prompt. The search portion
+                        // specifies an end-of-prompt search string, while the name portion
+                        // specifies the default shell name for the window. If the name ends in
+                        // a Ô:Õ screen will add what it believes to be the current command
+                        // running in the window to the end of the specified name (e.g. name:cmd).
+                        // Otherwise the current command name supersedes the shell name while it
+                        // is running.
+                        //
+                        // Here's how it works: you must modify your shell prompt to output a null
+                        // title-escape-sequence (<ESC> k <ESC> \) as a part of your prompt. The
+                        // last part of your prompt must be the same as the string you specified
+                        // for the search portion of the title. Once this is set up, screen will
+                        // use the title-escape-sequence to clear the previous command name and
+                        // get ready for the next command. Then, when a newline is received from
+                        // the shell, a search is made for the end of the prompt. If found, it
+                        // will grab the first word after the matched string and use it as the
+                        // command name. If the command name begins with Ô!Õ, Ô%Õ, or Ô^Õ, screen
+                        // will use the first word on the following line (if found) in preference
+                        // to the just-found name. This helps csh users get more accurate titles
+                        // when using job control or history recall commands.
+                        result.type = VT100_NOTSUPPORT;
+                    } else {
+                        result.type = XTERMCC_WINICON_TITLE;
+                    }
+                } else {
+                    result.type = VT100_WAIT;
+                }
+            } else {
+                result.type = VT100_WAIT;
+            }
+            break;
+
         case ' ':
             if (c2<0) {
                 result.type = VT100_WAIT;
@@ -1004,6 +1129,8 @@ static VT100TCC decode_control(unsigned char *datap,
         result = decode_xterm(datap, datalen, rmlen, enc);
     } else if (isANSI(datap, datalen)) {
         result = decode_ansi(datap, datalen, rmlen, SCREEN);
+    } else if (isUNDERSCORE(datap, datalen)) {
+        result = decode_underscore(datap, datalen, rmlen, enc);
     } else {
         NSCParameterAssert(datalen > 0);
 
@@ -1023,7 +1150,7 @@ static VT100TCC decode_control(unsigned char *datap,
                     result.type = VT100_WAIT;
                 }
                 else {
-                    result = decode_other(datap, datalen, rmlen);
+                    result = decode_other(datap, datalen, rmlen, enc);
                 }
                 break;
 
@@ -1661,6 +1788,18 @@ static VT100TCC decode_string(unsigned char *datap,
     alternateBackgroundSemantics = saveAltBackground;
 }
 
+- (void)setForegroundColor:(int)fgColorCode alternateSemantics:(BOOL)altsem
+{
+    FG_COLORCODE = fgColorCode;
+    alternateForegroundSemantics = altsem;
+}
+
+- (void)setBackgroundColor:(int)bgColorCode alternateSemantics:(BOOL)altsem
+{
+    BG_COLORCODE = bgColorCode;
+    alternateBackgroundSemantics = altsem;
+}
+
 - (void)reset
 {
     LINE_MODE = NO;
@@ -1747,10 +1886,22 @@ static VT100TCC decode_string(unsigned char *datap,
         STREAM = reallocf(STREAM, total_stream_length);
     }
 
-    memcpy(STREAM+current_stream_length, [data bytes], [data length]);
+    memcpy(STREAM + current_stream_length, [data bytes], [data length]);
     current_stream_length += [data length];
-    if(current_stream_length == 0)
+    if (current_stream_length == 0) {
         streamOffset = 0;
+	}
+}
+
+- (NSData *)streamData
+{
+    return [NSData dataWithBytes:STREAM + streamOffset
+                          length:current_stream_length - streamOffset];
+}
+
+- (void)clearStream
+{
+    streamOffset = current_stream_length;
 }
 
 - (VT100TCC)getNextToken
@@ -2296,6 +2447,11 @@ static VT100TCC decode_string(unsigned char *datap,
     return KEYPAD_MODE;
 }
 
+- (void)setKeypadMode:(BOOL)mode
+{
+    KEYPAD_MODE = YES;
+}
+
 - (BOOL)insertMode
 {
     return INSERT_MODE;
@@ -2391,6 +2547,15 @@ static VT100TCC decode_string(unsigned char *datap,
                           length:conststr_sizeof(REPORT_SDA)];
 }
 
+- (void)setInsertMode:(BOOL)mode
+{
+    INSERT_MODE = mode;
+}
+
+- (void)setCursorMode:(BOOL)mode
+{
+    CURSOR_MODE = mode;
+}
 
 - (void)_setMode:(VT100TCC)token
 {
@@ -2403,7 +2568,7 @@ static VT100TCC decode_string(unsigned char *datap,
 
             switch (token.u.csi.p[0]) {
                 case 20: LINE_MODE = mode; break;
-                case 1:  CURSOR_MODE = mode; break;
+                case 1:  [self setCursorMode:mode]; break;
                 case 2:  ANSI_MODE = mode; break;
                 case 3:  COLUMN_MODE = mode; break;
                 case 4:  SCROLL_MODE = mode; break;
@@ -2491,14 +2656,14 @@ static VT100TCC decode_string(unsigned char *datap,
 
             switch (token.u.csi.p[0]) {
                 case 4:
-                    INSERT_MODE = mode; break;
+                    [self setInsertMode:mode]; break;
             }
                 break;
         case VT100CSI_DECKPAM:
-            KEYPAD_MODE = YES;
+            [self setKeypadMode:YES];
             break;
         case VT100CSI_DECKPNM:
-            KEYPAD_MODE = NO;
+            [self setKeypadMode:NO];
             break;
         case VT100CC_SI:
             CHARSET = 0;
@@ -2700,11 +2865,11 @@ static VT100TCC decode_string(unsigned char *datap,
             [[[SCREEN session] TEXTVIEW] logWorkingDirectoryAtLine:lineNumber
                                                      withDirectory:value];
         } else if ([key isEqualToString:@"SetProfile"]) {
-            Bookmark *newProfile;
+            Profile *newProfile;
             if ([value length]) {
-                newProfile = [[BookmarkModel sharedInstance] bookmarkWithName:value];
+                newProfile = [[ProfileModel sharedInstance] bookmarkWithName:value];
             } else {
-                newProfile = [[BookmarkModel sharedInstance] defaultBookmark];
+                newProfile = [[ProfileModel sharedInstance] defaultBookmark];
             }
             if (newProfile) {
                 NSString *name = [[[SCREEN session] addressBookEntry] objectForKey:KEY_NAME];
@@ -2888,6 +3053,17 @@ static VT100TCC decode_string(unsigned char *datap,
 - (BOOL)bracketedPasteMode
 {
     return bracketedPasteMode_;
+}
+
+- (void)setMouseMode:(MouseMode)mode
+{
+    MOUSE_MODE = mode;
+    [SCREEN mouseModeDidChange:MOUSE_MODE];
+}
+
+- (void)setMouseFormat:(MouseFormat)format
+{
+    MOUSE_FORMAT = format;
 }
 
 @end

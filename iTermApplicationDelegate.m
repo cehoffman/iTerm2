@@ -25,20 +25,20 @@
  **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#import <iTerm/iTermApplicationDelegate.h>
-#import <iTerm/iTermController.h>
-#import <iTerm/ITAddressBookMgr.h>
-#import <iTerm/PreferencePanel.h>
-#import <iTerm/PseudoTerminal.h>
-#import <iTerm/PTYSession.h>
-#import <iTerm/VT100Terminal.h>
-#import <iTerm/FindCommandHandler.h>
-#import <iTerm/PTYWindow.h>
-#import <iTerm/PTYTextView.h>
-#import "iTerm/NSStringITerm.h"
-#import <BookmarksWindow.h>
+#import "iTermApplicationDelegate.h"
+#import "iTermController.h"
+#import "ITAddressBookMgr.h"
+#import "PreferencePanel.h"
+#import "PseudoTerminal.h"
+#import "PTYSession.h"
+#import "VT100Terminal.h"
+#import "PTYWindow.h"
+#import "PTYTextView.h"
+#import "NSStringITerm.h"
+#import "ProfilesWindow.h"
 #import "PTYTab.h"
 #import "iTermExpose.h"
+#import "ColorsMenuItemView.h"
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -169,19 +169,22 @@ static BOOL hasBecomeActive = NO;
             [WindowArrangements arrangementWithName:LEGACY_DEFAULT_ARRANGEMENT_NAME] != nil) {
             [WindowArrangements makeDefaultArrangement:LEGACY_DEFAULT_ARRANGEMENT_NAME];
         }
-        
+
         if ([[PreferencePanel sharedInstance] openBookmark]) {
+            // Open bookmarks window at startup.
             [self showBookmarkWindow:nil];
             if ([[PreferencePanel sharedInstance] openArrangementAtStartup]) {
                 // Open both bookmark window and arrangement!
                 [[iTermController sharedInstance] loadWindowArrangementWithName:[WindowArrangements defaultArrangementName]];
             }
         } else if ([[PreferencePanel sharedInstance] openArrangementAtStartup]) {
+            // Open the saved arrangement at startup.
             [[iTermController sharedInstance] loadWindowArrangementWithName:[WindowArrangements defaultArrangementName]];
-        } else if (!IsLionOrLater() || ![[NSUserDefaults standardUserDefaults] objectForKey:@"NotFirstRun"]) {
-            [[NSUserDefaults standardUserDefaults] setObject:[NSNumber numberWithBool:YES]
-                                                      forKey:@"NotFirstRun"];
-            [self newWindow:nil];
+        } else {
+            // Make sure at least one window is open.
+            if ([[[iTermController sharedInstance] terminals] count] == 0) {
+                [self newWindow:nil];
+            }
         }
     }
     ranAutoLaunchScript = YES;
@@ -229,12 +232,38 @@ static BOOL hasBecomeActive = NO;
     }
 }
 
-- (void)applicationDidFinishLaunching:(NSNotification *)aNotification
+- (void)setDefaultTerminal:(NSString *)bundleId
 {
-    // Make us the default handler for iterm2:// urls
+    CFStringRef unixExecutableContentType = (CFStringRef)@"public.unix-executable";
+    LSSetDefaultRoleHandlerForContentType(unixExecutableContentType,
+                                          kLSRolesShell,
+                                          (CFStringRef) bundleId);
+}
+
+- (IBAction)makeDefaultTerminal:(id)sender
+{
+    NSString *iTermBundleId = [[NSBundle mainBundle] bundleIdentifier];
+    [self setDefaultTerminal:iTermBundleId];
+}
+
+- (IBAction)unmakeDefaultTerminal:(id)sender
+{
+    [self setDefaultTerminal:@"com.apple.terminal"];
+}
+
+- (BOOL)isDefaultTerminal
+{
     LSSetDefaultHandlerForURLScheme((CFStringRef)@"iterm2",
                                     (CFStringRef)[[NSBundle mainBundle] bundleIdentifier]);
+    CFStringRef unixExecutableContentType = (CFStringRef)@"public.unix-executable";
+    CFStringRef unixHandler = LSCopyDefaultRoleHandlerForContentType(unixExecutableContentType, kLSRolesShell);
+    NSString *iTermBundleId = [[NSBundle mainBundle] bundleIdentifier];
+    return [iTermBundleId isEqualToString:(NSString *)unixHandler];
+}
 
+- (void)applicationDidFinishLaunching:(NSNotification *)aNotification
+{
+    finishedLaunching_ = YES;
     // Create the app support directory
     [self _createFlag];
 
@@ -329,7 +358,7 @@ static BOOL hasBecomeActive = NO;
             } else {
                 // Not a URL
                 NSString *format;
-                if ([BookmarkModel migrated]) {
+                if ([ProfileModel migrated]) {
                     format = @"Your preferences were modified by iTerm2 as part of an upgrade process (and you might have changed them, too). "
                     @"Since you load prefs from a custom location, your local preferences will be lost if not copied to %@.";
                 } else {
@@ -411,14 +440,13 @@ static BOOL hasBecomeActive = NO;
         [[NSFileManager defaultManager] fileExistsAtPath:filename isDirectory:&isDir];
         if (!isDir) {
             NSString *aString = [NSString stringWithFormat:@"%@; exit;\n", filename];
-            [[iTermController sharedInstance] launchBookmark:nil inTerminal:nil];
+            [[iTermController sharedInstance] launchBookmark:nil inTerminal:[self currentTerminal]];
             // Sleeping a while waiting for the login.
             sleep(1);
             [[[[iTermController sharedInstance] currentTerminal] currentSession] insertText:aString];
-        }
-        else {
+        } else {
             NSString *aString = [NSString stringWithFormat:@"cd %@\n", filename];
-            [[iTermController sharedInstance] launchBookmark:nil inTerminal:nil];
+            [[iTermController sharedInstance] launchBookmark:nil inTerminal:[self currentTerminal]];
             // Sleeping a while waiting for the login.
             sleep(1);
             [[[[iTermController sharedInstance] currentTerminal] currentSession] insertText:aString];
@@ -429,9 +457,14 @@ static BOOL hasBecomeActive = NO;
 
 - (BOOL)applicationOpenUntitledFile:(NSApplication *)theApplication
 {
-    if (hasBecomeActive) {
-        [self _performIdempotentStartupActivities];
+    if (!finishedLaunching_ &&
+        [[PreferencePanel sharedInstance] openArrangementAtStartup]) {
+        // This happens if the OS is pre 10.7 or restore windows is off in
+        // 10.7's prefs->general, and the window arrangement has no windows,
+        // and it's set to load the arrangement on startup.
+        return NO;
     }
+    [self newWindow:nil];
     return YES;
 }
 
@@ -549,6 +582,20 @@ static BOOL hasBecomeActive = NO;
 - (void)awakeFromNib
 {
     secureInputDesired_ = [[[NSUserDefaults standardUserDefaults] objectForKey:@"Secure Input"] boolValue];
+
+    NSMenu *appMenu = [NSApp mainMenu];
+    NSMenuItem *viewMenuItem = [appMenu itemWithTitle:@"View"];
+    NSMenu *viewMenu = [viewMenuItem submenu];
+
+    [viewMenu addItem: [NSMenuItem separatorItem]];
+    ColorsMenuItemView *labelTrackView = [[[ColorsMenuItemView alloc]
+                                           initWithFrame:NSMakeRect(0, 0, 180, 50)] autorelease];
+    NSMenuItem *item;
+    item = [[[NSMenuItem alloc] initWithTitle:@"Current Tab Color"
+                                       action:@selector(changeTabColorToMenuAction:)
+                                keyEquivalent:@""] autorelease];
+    [item setView:labelTrackView];
+    [viewMenu addItem:item];
 }
 
 - (BOOL)showToolbelt
@@ -639,10 +686,10 @@ static BOOL hasBecomeActive = NO;
         NSLog(@"Bad host: %@", [url host]);
         return;
     }
-    Bookmark *profile = nil;
+    Profile *profile = nil;
     if ([query objectForKey:@"profile"]) {
         NSString *bookmarkName = [[query objectForKey:@"profile"] stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
-        profile = [[BookmarkModel sharedInstance] bookmarkWithName:bookmarkName];
+        profile = [[ProfileModel sharedInstance] bookmarkWithName:bookmarkName];
     }
     PTYSession *aSession;
     if (!doLaunch) {
@@ -732,7 +779,7 @@ static BOOL hasBecomeActive = NO;
 
 - (IBAction)showBookmarkWindow:(id)sender
 {
-    [[BookmarksWindow sharedInstance] showWindow:sender];
+    [[ProfilesWindow sharedInstance] showWindow:sender];
 }
 
 - (IBAction)instantReplayPrev:(id)sender
@@ -1015,9 +1062,11 @@ void DebugLog(NSString* value)
     PTYSession* session = [frontTerminal currentSession];
     PTYTextView* textview = [session TEXTVIEW];
     [textview setFont:font nafont:nafont horizontalSpacing:hs verticalSpacing:vs];
-    [frontTerminal sessionInitiatedResize:session
-                                    width:[[abEntry objectForKey:KEY_COLUMNS] intValue]
-                                   height:[[abEntry objectForKey:KEY_ROWS] intValue]];
+        if ([sender isAlternate]) {
+                [frontTerminal sessionInitiatedResize:session
+                                                                                width:[[abEntry objectForKey:KEY_COLUMNS] intValue]
+                                                                           height:[[abEntry objectForKey:KEY_ROWS] intValue]];
+        }
 }
 
 - (IBAction)exposeForTabs:(id)sender
@@ -1151,7 +1200,7 @@ void DebugLog(NSString* value)
     params.alternateOpenAllSelector = @selector(newSessionsInWindow:);
     params.target = [iTermController sharedInstance];
 
-    [BookmarkModel applyJournal:[aNotification userInfo]
+    [ProfileModel applyJournal:[aNotification userInfo]
                          toMenu:bookmarkMenu
                  startingAtItem:5
                          params:&params];
@@ -1203,6 +1252,8 @@ void DebugLog(NSString* value)
     if ([menuItem action] == @selector(toggleUseBackgroundPatternIndicator:)) {
       [menuItem setState:[self useBackgroundPatternIndicator]];
       return YES;
+    } else if ([menuItem action] == @selector(makeDefaultTerminal:)) {
+        return ![self isDefaultTerminal];
     } else if (menuItem == maximizePane) {
         if ([[[iTermController sharedInstance] currentTerminal] inInstantReplay]) {
             // Things get too complex if you allow this. It crashes.
@@ -1452,9 +1503,16 @@ void DebugLog(NSString* value)
     }
 }
 
-- (IBAction) jumpToSelection: (id) sender
+- (IBAction)jumpToSelection:(id)sender
 {
-    [[FindCommandHandler sharedInstance] jumpToSelection];
+    id obj = [[NSApp mainWindow] firstResponder];
+    PTYTextView *textView = 
+        (obj && [obj isKindOfClass:[PTYTextView class]]) ? obj : nil;
+    if (textView) {
+        [textView scrollToSelection];
+    } else {
+        NSBeep();
+    }
 }
 
 @end

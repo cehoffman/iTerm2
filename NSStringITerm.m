@@ -27,7 +27,7 @@
  */
 
 #define NSSTRINGJTERMINAL_CLASS_COMPILE
-#import <iTerm/NSStringITerm.h>
+#import "NSStringITerm.h"
 
 #define AMB_CHAR_NUMBER (sizeof(ambiguous_chars) / sizeof(int))
 
@@ -260,6 +260,7 @@ static const int ambiguous_chars[] = {
     char *argStart; // The start of the current argument we are processing
     char *copyPos; // The position where we are currently writing characters
     int inQuotes = 0; // Are we inside double quotes?
+    BOOL inWhitespace = NO;  // Last char was whitespace if true
 
     mutableCmdArgs = [[NSMutableArray alloc] init];
 
@@ -283,6 +284,7 @@ static const int ambiguous_chars[] = {
     while ((c = *nextChar++)) {
         switch (c) {
             case '\\':
+                inWhitespace = NO;
                 if (*nextChar == '\0') {
                     // This is the last character, thus this is a malformed
                     // command line, we will just leave the "\" character as a
@@ -293,6 +295,7 @@ static const int ambiguous_chars[] = {
                 *copyPos++ = *nextChar++;
                 break;
             case '\"':
+                inWhitespace = NO;
                 // Time to toggle the quotation mode
                 inQuotes = !inQuotes;
                 // Note: Since we don't copy to/increment copyPos, this
@@ -305,11 +308,18 @@ static const int ambiguous_chars[] = {
                     // We need to copy the current character verbatim.
                     *copyPos++ = c;
                 } else {
-                    // Time to split the command
-                    *copyPos = '\0';
-                    [mutableCmdArgs addObject:[NSString stringWithUTF8String: argStart]];
-                    argStart = nextChar;
-                    copyPos = nextChar;
+                    if (!inWhitespace) {
+                        // Time to split the command
+                        *copyPos = '\0';
+                        [mutableCmdArgs addObject:[NSString stringWithUTF8String:argStart]];
+                        argStart = nextChar;
+                        copyPos = nextChar;
+                        inWhitespace = YES;
+                    } else {
+                        // Skip possible start of next arg when seeing Nth
+                        // consecutive whitespace for N > 1.
+                        ++argStart;
+                    }
                 }
                 break;
             default:
@@ -318,6 +328,7 @@ static const int ambiguous_chars[] = {
                 // case' where copyPos is not offset from the current place we
                 // are reading from. Since this function is called rarely, and
                 // it isn't that slow, we will just ignore the optimisation.
+                inWhitespace = NO;
                 *copyPos++ = c;
                 break;
         }
@@ -359,6 +370,18 @@ static int fromhex(unichar c) {
         return c - 'a' + 10;
     }
     return c - 'A' + 10;
+}
+
+- (NSData *)dataFromHexValues
+{
+	NSMutableData *data = [NSMutableData data];
+	for (int i = 0; i < self.length - 1; i+=2) {
+		const char high = fromhex([self characterAtIndex:i]) << 4;
+		const char low = fromhex([self characterAtIndex:i + 1]);
+		const char b = high | low;
+		[data appendBytes:&b length:1];
+	}
+	return data;
 }
 
 - (NSString *)stringByReplacingEscapedHexValuesWithChars
@@ -424,6 +447,14 @@ static int fromhex(unichar c) {
     }
 
     return newString;
+}
+
+// foo"bar -> foo\"bar
+// foo\bar -> foo\\bar
+// foo\"bar -> foo\\\"bar
+- (NSString *)stringByEscapingQuotes {
+    return [[self stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
+               stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
 }
 
 @end

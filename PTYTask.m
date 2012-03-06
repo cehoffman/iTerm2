@@ -43,8 +43,8 @@
 #include <sys/select.h>
 #include <libproc.h>
 
-#import <iTerm/PTYTask.h>
-#import <iTerm/PreferencePanel.h>
+#import "PTYTask.h"
+#import "PreferencePanel.h"
 #import "ProcessCache.h"
 
 #include <dlfcn.h>
@@ -481,8 +481,8 @@ setup_tty_param(
     term->c_cc[VDSUSP] = CTRLKEY('Y');
     term->c_cc[VSTART] = CTRLKEY('Q');
     term->c_cc[VSTOP] = CTRLKEY('S');
-    term->c_cc[VLNEXT] = -1;
-    term->c_cc[VDISCARD] = -1;
+    term->c_cc[VLNEXT] = CTRLKEY('V');
+    term->c_cc[VDISCARD] = CTRLKEY('O');
     term->c_cc[VMIN] = 1;
     term->c_cc[VTIME] = 0;
     term->c_cc[VSTATUS] = CTRLKEY('T');
@@ -541,6 +541,7 @@ setup_tty_param(
     [writeBuffer release];
     [tty release];
     [path release];
+	[command_ release];
 
     @synchronized (self) {
         [[self coprocess] mainProcessDidTerminate];
@@ -565,6 +566,11 @@ static void reapchild(int n)
   // we reap our children when our select() loop sees that a pipes is broken.
 }
 
+- (NSString *)command
+{
+	return command_;
+}
+
 - (void)launchWithPath:(NSString*)progpath
              arguments:(NSArray*)args
            environment:(NSDictionary*)env
@@ -578,59 +584,64 @@ static void reapchild(int n)
     char theTtyname[PATH_MAX];
     int sts;
 
+	[command_ autorelease];
+	command_ = [progpath copy];
     path = [progpath copy];
-
-#if DEBUG_METHOD_TRACE
-    NSLog(@"%s(%d):-[launchWithPath:%@ arguments:%@ environment:%@ width:%d height:%d", __FILE__, __LINE__, progpath, args, env, width, height);
-#endif
 
     setup_tty_param(&term, &win, width, height, isUTF8);
     // Register a handler for the child death signal.
     signal(SIGCHLD, reapchild);
+    const char* argpath;
+    argpath = [[progpath stringByStandardizingPath] UTF8String];
+
+    int max = (args == nil) ? 0 : [args count];
+    const char* argv[max + 2];
+
+    if (asLoginSession) {
+        argv[0] = [[NSString stringWithFormat:@"-%@", [progpath stringByStandardizingPath]] UTF8String];
+    } else {
+        argv[0] = [[progpath stringByStandardizingPath] UTF8String];
+    }
+    if (args != nil) {
+        int i;
+        for (i = 0; i < max; ++i) {
+            argv[i + 1] = [[args objectAtIndex:i] cString];
+        }
+    }
+    argv[max + 1] = NULL;
+    const int envsize = env.count;
+    const char *envKeys[envsize];
+    const char *envValues[envsize];
+    // Copy values from env (our custom environment vars) into envDict
+    int i = 0;
+    for (NSString *k in env) {
+        NSString *v = [env objectForKey:k];
+        envKeys[i] = [k UTF8String];
+        envValues[i] = [v UTF8String];
+        i++;
+    }
+
+    // Note: stringByStandardizingPath will automatically call stringByExpandingTildeInPath.
+    const char *initialPwd = [[[env objectForKey:@"PWD"] stringByStandardizingPath] UTF8String];
     pid = forkpty(&fd, theTtyname, &term, &win);
     if (pid == (pid_t)0) {
-        const char* argpath;
-        argpath = [[progpath stringByStandardizingPath] UTF8String];
         // Do not start the new process with a signal handler.
         signal(SIGCHLD, SIG_DFL);
         signal(SIGPIPE, SIG_DFL);
-        
-        int max = (args == nil) ? 0 : [args count];
-        const char* argv[max + 2];
+		sigset_t signals;
+		sigemptyset(&signals);
+		sigaddset(&signals, SIGPIPE);
+		sigprocmask(SIG_UNBLOCK, &signals, NULL);
 
-        if (asLoginSession) {
-            argv[0] = [[NSString stringWithFormat:@"-%@", [progpath stringByStandardizingPath]] UTF8String];
-        } else {
-            argv[0] = [[progpath stringByStandardizingPath] UTF8String];
+        chdir(initialPwd);
+        for (i = 0; i < envsize; i++) {
+            setenv(envKeys[i], envValues[i], 1);
         }
-        if (args != nil) {
-            int i;
-            for (i = 0; i < max; ++i) {
-                argv[i + 1] = [[args objectAtIndex:i] cString];
-            }
-        }
-        argv[max + 1] = NULL;
-
-        if (env != nil) {
-            NSArray* keys = [env allKeys];
-            int i, theMax = [keys count];
-            for (i = 0; i < theMax; ++i) {
-                NSString* key;
-                NSString* value;
-                key = [keys objectAtIndex:i];
-                value = [env objectForKey:key];
-                if (key != nil && value != nil) {
-                    setenv([key UTF8String], [value UTF8String], 1);
-                }
-            }
-        }
-        // Note: stringByStandardizingPath will automatically call stringByExpandingTildeInPath.
-        chdir([[[env objectForKey:@"PWD"] stringByStandardizingPath] UTF8String]);
         sts = execvp(argpath, (char* const*)argv);
 
         /* exec error */
         fprintf(stdout, "## exec failed ##\n");
-        fprintf(stdout, "%s %s\n", argpath, strerror(errno));
+        fprintf(stdout, "argpath=%s error=%s\n", argpath, strerror(errno));
 
         sleep(1);
         _exit(-1);

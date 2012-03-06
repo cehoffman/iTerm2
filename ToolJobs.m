@@ -174,6 +174,7 @@ static const CGFloat kMargin = 4;
 - (void)shutdown
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    shutdown_ = YES;
     [timer_ invalidate];
     [kill_ unbind:@"enabled"];
     timer_ = nil;
@@ -181,6 +182,9 @@ static const CGFloat kMargin = 4;
 
 - (void)updateTimer:(id)sender
 {
+    if (shutdown_) {
+        return;
+    }
     ToolWrapper *wrapper = (ToolWrapper *)[[self superview] superview];
     pid_t rootPid = [[[wrapper.term currentSession] SHELL] pid];
     NSSet *pids = [[ProcessCache sharedInstance] childrenOfPid:rootPid levelsToSkip:0];
@@ -194,10 +198,15 @@ static const CGFloat kMargin = 4;
     int i = 0;
     for (NSNumber *pid in pids_) {
         BOOL fg;
-        [names_ addObject:[[ProcessCache sharedInstance] getNameOfPid:[pid intValue] isForeground:&fg]];
-        i++;
-        if (i > kMaxJobs) {
-            break;
+        NSString *pidName;
+        pidName = [[ProcessCache sharedInstance] getNameOfPid:[pid intValue]
+                                                 isForeground:&fg];
+        if (pidName) {
+            [names_ addObject:pidName];
+            i++;
+            if (i > kMaxJobs) {
+                break;
+            }
         }
     }
     [tableView_ reloadData];
@@ -208,8 +217,10 @@ static const CGFloat kMargin = 4;
 
 - (void)fixCursor
 {
-    ToolWrapper *wrapper = (ToolWrapper *)[[self superview] superview];
-    [[[wrapper.term currentSession] TEXTVIEW] updateCursor:[[NSApplication sharedApplication] currentEvent]];
+    if (!shutdown_) {
+        ToolWrapper *wrapper = (ToolWrapper *)[[self superview] superview];
+        [[[wrapper.term currentSession] TEXTVIEW] updateCursor:[[NSApplication sharedApplication] currentEvent]];
+    }
 }
 
 - (BOOL)isFlipped

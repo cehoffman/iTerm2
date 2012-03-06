@@ -33,19 +33,19 @@
 #define DEBUG_METHOD_TRACE    0
 //#define DEBUG_CORRUPTION
 
-#import <iTerm/iTerm.h>
-#import <iTerm/VT100Screen.h>
-#import <iTerm/NSStringITerm.h>
+#import "iTerm.h"
+#import "VT100Screen.h"
+#import "NSStringITerm.h"
 #import "WindowControllerInterface.h"
-#import <iTerm/PTYTextView.h>
-#import <iTerm/PTYScrollView.h>
-#import <iTerm/charmaps.h>
-#import <iTerm/PTYSession.h>
-#import <iTerm/PTYTask.h>
-#import <iTerm/PreferencePanel.h>
+#import "PTYTextView.h"
+#import "PTYScrollView.h"
+#import "charmaps.h"
+#import "PTYSession.h"
+#import "PTYTask.h"
+#import "PreferencePanel.h"
 #import "iTermApplicationDelegate.h"
-#import <iTerm/iTermGrowlDelegate.h>
-#import <iTerm/ITAddressBookMgr.h>
+#import "iTermGrowlDelegate.h"
+#import "ITAddressBookMgr.h"
 #include <string.h>
 #include <unistd.h>
 #include <LineBuffer.h>
@@ -54,6 +54,7 @@
 #import "ITAddressBookMgr.h"
 #import "iTermExpose.h"
 #import "RegexKitLite.h"
+#import "TmuxStateParser.h"
 
 #define MAX_SCROLLBACK_LINES 1000000
 #define DIRTY_MAGIC 0x76  // Used to ensure we don't go off end of dirty array
@@ -230,9 +231,11 @@ static __inline__ screen_char_t *incrementLinePointer(screen_char_t *buf_start, 
 @interface VT100Screen (Private)
 
 - (screen_char_t *)_getLineAtIndex:(int)anIndex fromLine:(screen_char_t *)aLine;
+- (screen_char_t *)_getDefaultLineWithChar:(screen_char_t)defaultChar;
 - (screen_char_t*)_getDefaultLineWithWidth:(int)width;
 - (int)_addLineToScrollbackImpl;
 - (void)_setInitialTabStops;
+- (screen_char_t)defaultChar;
 
 @end
 
@@ -755,7 +758,8 @@ static char* FormatCont(int c)
     screen_char_t *theLine = nil;
     int lineY = -1;
     [self setDirtyFromX:startPoint.x Y:startPoint.y toX:endPoint.x Y:endPoint.y];
-    while (x != endPoint.x || y != endPoint.y) {
+    int n = endPoint.x + endPoint.y * WIDTH;
+    while (x + y * WIDTH < n) {
         if (lineY != y) {
             theLine = [self getLineAtScreenIndex:y];
             lineY = y;
@@ -843,6 +847,10 @@ static char* FormatCont(int c)
             int endY = y + end / WIDTH;
             int endX = end % WIDTH;
 
+            if (endY >= HEIGHT) {
+                endY = HEIGHT - 1;
+                endX = WIDTH;
+            }
             [self highlightWithChar:prototypechar fromPoint:NSMakePoint(startX, startY) toPoint:NSMakePoint(endX, endY)];
 
             searchRange.location = range.location + range.length;
@@ -935,6 +943,52 @@ static char* FormatCont(int c)
     return numLines;
 }
 
+- (void)restoreScreenFromScrollbackWithDefaultLine:(screen_char_t *)defaultLine
+{
+    // Move scrollback lines into screen
+    int num_lines_in_scrollback = [linebuffer numLinesWithWidth:WIDTH];
+    int dest_y;
+    if (num_lines_in_scrollback >= HEIGHT) {
+        dest_y = HEIGHT - 1;
+    } else {
+        dest_y = num_lines_in_scrollback - 1;
+    }
+
+    BOOL found_cursor = NO;
+    BOOL prevLineStartsWithDoubleWidth = NO;
+    while (dest_y >= 0) {
+        screen_char_t* dest = [self getLineAtScreenIndex: dest_y];
+        memcpy(dest, defaultLine, sizeof(screen_char_t) * WIDTH);
+        if (!found_cursor) {
+            int tempCursor = cursorX;
+            found_cursor = [linebuffer getCursorInLastLineWithWidth:WIDTH atX:&tempCursor];
+            if (found_cursor) {
+                [self setCursorX:tempCursor % WIDTH
+                               Y:dest_y + tempCursor / WIDTH];
+            }
+        }
+        int cont;
+        [linebuffer popAndCopyLastLineInto:dest width:WIDTH includesEndOfLine:&cont];
+        if (cont && dest[WIDTH - 1].code == 0 && prevLineStartsWithDoubleWidth) {
+            // If you pop a soft-wrapped line that's a character short and the
+            // line below it starts with a DWC, it's safe to conclude that a DWC
+            // was wrapped.
+            dest[WIDTH - 1].code = DWC_SKIP;
+            cont = EOL_DWC;
+        }
+        if (dest[1].code == DWC_RIGHT) {
+            prevLineStartsWithDoubleWidth = YES;
+        } else {
+            prevLineStartsWithDoubleWidth = NO;
+        }
+        dest[WIDTH].code = cont;
+        if (cont == EOL_DWC) {
+            dest[WIDTH - 1].code = DWC_SKIP;
+        }
+        --dest_y;
+    }
+}
+
 - (void)resizeWidth:(int)new_width height:(int)new_height
 {
     DLog(@"Resize session to %d height", new_height);
@@ -980,6 +1034,34 @@ static char* FormatCont(int c)
     } else {
         // Keep last used line a fixed distance from the bottom of the screen
         [self _appendScreenToScrollback:HEIGHT];
+    }
+
+    // If we're in the alternate screen, create a temporary linebuffer and append
+    // the base screen's contents to it.
+    LineBuffer *tempLineBuffer = [[[LineBuffer alloc] init] autorelease];
+    if (temp_buffer) {
+        screen_char_t *saved_buffer_lines = buffer_lines;
+        screen_char_t *saved_screen_top = screen_top;
+        LineBuffer *saved_line_buffer = linebuffer;
+        
+        linebuffer = tempLineBuffer;
+        buffer_lines = temp_buffer;
+        screen_top = temp_buffer;
+        
+        int altUsedHeight = [self _usedHeight];
+        if (HEIGHT - new_height >= altUsedHeight) {
+            // Height is decreasing but pushing HEIGHT lines into the buffer would scroll all the used
+            // lines off the top, leaving the cursor floating without any text. Keep all used lines that
+            // fit onscreen.
+            [self _appendScreenToScrollback:MAX(altUsedHeight, new_height)];
+        } else {
+            // Keep last used line a fixed distance from the bottom of the screen
+            [self _appendScreenToScrollback:HEIGHT];
+        }
+        
+        linebuffer = saved_line_buffer;
+        buffer_lines = saved_buffer_lines;
+        screen_top = saved_screen_top;
     }
 
     BOOL startPositionBeforeEnd = NO;
@@ -1040,54 +1122,38 @@ static char* FormatCont(int c)
     memset(dirty, 1, dirtySize * sizeof(char));
     result_line = (screen_char_t*)calloc((new_width + 1), sizeof(screen_char_t));
 
-    // Move scrollback lines into screen
-    int num_lines_in_scrollback = [linebuffer numLinesWithWidth: new_width];
-    int dest_y;
-    if (num_lines_in_scrollback >= new_height) {
-        dest_y = new_height - 1;
-    } else {
-        dest_y = num_lines_in_scrollback - 1;
-    }
-
     // new height and width
     WIDTH = new_width;
     HEIGHT = new_height;
 
+    // Restore the screen contents that were pushed onto the linebuffer.
+    [self restoreScreenFromScrollbackWithDefaultLine:[self _getDefaultLineWithWidth:WIDTH]];
+    
+    // If we're in the alternate screen, restore its contents from the temporary
+    // linebuffer.
+    if (temp_buffer) {
+        screen_char_t *saved_buffer_lines = buffer_lines;
+        screen_char_t *saved_screen_top = screen_top;
+        LineBuffer *saved_line_buffer = linebuffer;
+        
+        // Allocate a new temp_buffer of the right size.
+        screen_char_t* aDefaultLine = [self _getDefaultLineWithChar:temp_default_char];
+        free(temp_buffer);
+        temp_buffer = (screen_char_t*)calloc(REAL_WIDTH * HEIGHT, (sizeof(screen_char_t)));
+        for(i = 0; i < HEIGHT; i++) {
+            memcpy(temp_buffer+i*REAL_WIDTH, aDefaultLine, REAL_WIDTH*sizeof(screen_char_t));
+        }        
 
-    int source_line_num = num_lines_in_scrollback;
-    BOOL found_cursor = NO;
-    BOOL prevLineStartsWithDoubleWidth = NO;
-    while (dest_y >= 0) {
-        screen_char_t* dest = [self getLineAtScreenIndex: dest_y];
-        memcpy(dest, defaultLine, sizeof(screen_char_t) * WIDTH);
-        if (!found_cursor) {
-            int tempCursor = cursorX;
-            found_cursor = [linebuffer getCursorInLastLineWithWidth: new_width atX:&tempCursor];
-            if (found_cursor) {
-                [self setCursorX:tempCursor % new_width
-                               Y:dest_y + tempCursor / new_width];
-            }
-        }
-        int cont;
-        [linebuffer popAndCopyLastLineInto:dest width:WIDTH includesEndOfLine:&cont];
-        if (cont && dest[WIDTH - 1].code == 0 && prevLineStartsWithDoubleWidth) {
-            // If you pop a soft-wrapped line that's a character short and the
-            // line below it starts with a DWC, it's safe to conclude that a DWC
-            // was wrapped.
-            dest[WIDTH - 1].code = DWC_SKIP;
-            cont = EOL_DWC;
-        }
-        if (dest[1].code == DWC_RIGHT) {
-            prevLineStartsWithDoubleWidth = YES;
-        } else {
-            prevLineStartsWithDoubleWidth = NO;
-        }
-        dest[WIDTH].code = cont;
-        if (cont == EOL_DWC) {
-            dest[WIDTH - 1].code = DWC_SKIP;
-        }
-        --dest_y;
-        --source_line_num;
+        linebuffer = tempLineBuffer;
+        buffer_lines = temp_buffer;
+        screen_top = temp_buffer;
+
+        [self restoreScreenFromScrollbackWithDefaultLine:aDefaultLine];
+        temp_buffer = buffer_lines;
+        
+        linebuffer = saved_line_buffer;
+        buffer_lines = saved_buffer_lines;
+        screen_top = saved_screen_top;
     }
 
 #ifdef DEBUG_RESIZEDWIDTH
@@ -1117,16 +1183,6 @@ static char* FormatCont(int c)
     }
     if (ALT_SAVE_CURSOR_Y >= new_height) {
         ALT_SAVE_CURSOR_Y = new_height-1;
-    }
-
-    // if we did the resize in SAVE_BUFFER mode, too bad, get rid of it
-    if (temp_buffer) {
-        screen_char_t* aDefaultLine = [self _getDefaultLineWithWidth:WIDTH];
-        free(temp_buffer);
-        temp_buffer = (screen_char_t*)calloc(REAL_WIDTH * HEIGHT, (sizeof(screen_char_t)));
-        for(i = 0; i < HEIGHT; i++) {
-            memcpy(temp_buffer+i*REAL_WIDTH, aDefaultLine, REAL_WIDTH*sizeof(screen_char_t));
-        }
     }
 
     // The linebuffer may have grown. Ensure it doesn't have too many lines.
@@ -1664,7 +1720,7 @@ static char* FormatCont(int c)
         {
             char buf[64];
             snprintf(buf, sizeof(buf), "\033[%dt", [[[SESSION tab] parentWindow] windowIsMiniaturized] ? 2 : 1);
-            [SHELL writeTask:[NSData dataWithBytes:buf
+            [SESSION writeTask:[NSData dataWithBytes:buf
                                             length:strlen(buf)]];
         }
         break;
@@ -1674,7 +1730,7 @@ static char* FormatCont(int c)
             NSRect frame = [[[SESSION tab] parentWindow] windowFrame];
             // TODO: Figure out wtf to do if there are multiple sessions in one tab.
             snprintf(buf, sizeof(buf), "\033[3;%d;%dt", (int) frame.origin.x, (int) frame.origin.y);
-            [SHELL writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
+            [SESSION writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
         }
         break;
     case XTERMCC_REPORT_WIN_PIX_SIZE:
@@ -1683,7 +1739,7 @@ static char* FormatCont(int c)
             NSRect frame = [[[SESSION tab] parentWindow] windowFrame];
             // TODO: Some kind of adjustment for panes?
             snprintf(buf, sizeof(buf), "\033[4;%d;%dt", (int) frame.size.height, (int) frame.size.width);
-            [SHELL writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
+            [SESSION writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
         }
         break;
     case XTERMCC_REPORT_WIN_SIZE:
@@ -1691,7 +1747,7 @@ static char* FormatCont(int c)
             char buf[64];
             // TODO: Some kind of adjustment for panes
             snprintf(buf, sizeof(buf), "\033[8;%d;%dt", HEIGHT, WIDTH);
-            [SHELL writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
+            [SESSION writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
         }
         break;
     case XTERMCC_REPORT_SCREEN_SIZE:
@@ -1707,21 +1763,21 @@ static char* FormatCont(int c)
             int w =  (screenSize.size.width - wch - MARGIN * 2) / [display charWidth];
 
             snprintf(buf, sizeof(buf), "\033[9;%d;%dt", h, w);
-            [SHELL writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
+            [SESSION writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
         }
         break;
     case XTERMCC_REPORT_ICON_TITLE:
         {
             char buf[64];
             snprintf(buf, sizeof(buf), "\033]L%s\033\\", [[SESSION name] UTF8String]);
-            [SHELL writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
+            [SESSION writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
         }
         break;
     case XTERMCC_REPORT_WIN_TITLE:
         {
             char buf[64];
             snprintf(buf, sizeof(buf), "\033]l%s\033\\", [[SESSION windowTitle] UTF8String]);
-            [SHELL writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
+            [SESSION writeTask: [NSData dataWithBytes:buf length:strlen(buf)]];
         }
         break;
 
@@ -1736,8 +1792,22 @@ static char* FormatCont(int c)
                              [SESSION name],
                              [[SESSION tab] realObjectCount],
                              token.u.string]
-            andNotification:@"Customized Message"];
+            andNotification:@"Customized Message"
+                 andSession:SESSION];
         }
+        break;
+
+	case UNDERSCORE_TMUX_UNSUPPORTED:
+		[self crlf];
+		[self setString:@"You have run an unsupported version of tmux. Please "
+			@"install a version that is compatible with this build of iTerm2."
+					ascii:YES];
+		[self crlf];
+		[SESSION writeTask:[@"detach\n" dataUsingEncoding:NSUTF8StringEncoding]];
+		break;
+
+    case UNDERSCORE_TMUX1:
+        [SESSION startTmuxMode];
         break;
 
     default:
@@ -1789,6 +1859,7 @@ static char* FormatCont(int c)
         memcpy(temp_buffer, screen_top, (HEIGHT-n)*REAL_WIDTH*sizeof(screen_char_t));
         memcpy(temp_buffer + (HEIGHT - n) * REAL_WIDTH, buffer_lines, n * REAL_WIDTH * sizeof(screen_char_t));
     }
+    temp_default_char = [self defaultChar];
 }
 
 - (void)restoreBuffer
@@ -1814,7 +1885,7 @@ static char* FormatCont(int c)
 
 - (void)mouseModeDidChange:(MouseMode)mouseMode
 {
-    [display updateCursor:nil];
+	[display updateCursor:nil];
 }
 
 - (BOOL)printToAnsi
@@ -2278,6 +2349,12 @@ void DumpBuf(screen_char_t* p, int n) {
     }
 }
 
+- (void)crlf
+{
+    [self setNewLine];
+    [self setCursorX:0 Y:cursorY];
+}
+
 - (void)setNewLine
 {
     screen_char_t *aLine;
@@ -2377,14 +2454,18 @@ void DumpBuf(screen_char_t* p, int n) {
 
 - (void)backSpace
 {
-#if DEBUG_METHOD_TRACE
-    NSLog(@"%s(%d):-[VT100Screen backSpace]", __FILE__, __LINE__);
-#endif
     if (cursorX > 0) {
         if (cursorX >= WIDTH) {
             [self setCursorX:cursorX - 2 Y:cursorY];
         } else {
             [self setCursorX:cursorX - 1 Y:cursorY];
+        }
+    } else if (cursorX == 0 && cursorY > 0) {
+        screen_char_t* aLine = [self getLineAtScreenIndex:cursorY - 1];
+        if (aLine[WIDTH].code == EOL_SOFT) {
+            [self setCursorX:WIDTH - 1 Y:cursorY - 1];
+        } else if (aLine[WIDTH].code == EOL_DWC) {
+            [self setCursorX:WIDTH - 2 Y:cursorY - 1];
         }
     }
 }
@@ -3223,7 +3304,7 @@ void DumpBuf(screen_char_t* p, int n) {
     }
 
     if (report != nil) {
-        [SHELL writeTask:report];
+        [SESSION writeTask:report];
     }
 }
 
@@ -3244,7 +3325,7 @@ void DumpBuf(screen_char_t* p, int n) {
         report = [TERMINAL reportDeviceAttribute];
 
     if (report != nil) {
-        [SHELL writeTask:report];
+        [SESSION writeTask:report];
     }
 }
 
@@ -3364,6 +3445,85 @@ void DumpBuf(screen_char_t* p, int n) {
         NSAssert(isOk, @"Pop shouldn't fail");
     }
     free(dummy);
+}
+
+- (void)setHistory:(NSArray *)history
+{
+    [self clearBuffer];
+    for (NSData *chars in history) {
+        screen_char_t *line = (screen_char_t *) [chars bytes];
+        int length = [chars length] / sizeof(screen_char_t);
+        length--;  // Last position is wrap flag
+
+        BOOL isPartial = (line[length].code == EOL_SOFT);
+        [linebuffer appendLine:line length:length partial:isPartial width:WIDTH];
+    }
+    if (!unlimitedScrollback_) {
+        [linebuffer dropExcessLinesWithWidth:WIDTH];
+    }
+
+    // We don't know the cursor position yet but give the linebuffer something
+    // so it doesn't get confused in restoreScreenFromScrollback.
+    [linebuffer setCursor:0];
+    [self restoreScreenFromScrollbackWithDefaultLine:[self _getDefaultLineWithWidth:WIDTH]];
+}
+
+- (void)setAltScreen:(NSArray *)lines
+{
+    // Initialize alternate screen to be empty
+    screen_char_t* aDefaultLine = [self _getDefaultLineWithWidth:WIDTH];
+    if (temp_buffer) {
+        free(temp_buffer);
+    }
+    temp_buffer = (screen_char_t*) calloc(REAL_WIDTH * HEIGHT, sizeof(screen_char_t));
+    for (int i = 0; i < HEIGHT; i++) {
+        memcpy(temp_buffer + i * REAL_WIDTH,
+               aDefaultLine,
+               REAL_WIDTH * sizeof(screen_char_t));
+    }
+    temp_default_char = [self defaultChar];
+
+    // Copy the lines back over it
+    for (int i = 0; i < MIN(lines.count, HEIGHT); i++) {
+        NSData *chars = [lines objectAtIndex:i];
+        screen_char_t *line = (screen_char_t *) [chars bytes];
+        int length = [chars length] / sizeof(screen_char_t);
+        length--;  // Last position is wrap flag
+        BOOL isPartial = (line[length].code == EOL_SOFT);
+        memmove(temp_buffer + i * REAL_WIDTH,
+                line,
+                length * sizeof(screen_char_t));
+        temp_buffer[i * REAL_WIDTH + WIDTH].code = (isPartial ? EOL_SOFT : EOL_HARD);
+    }
+}
+
+- (void)setTmuxState:(NSDictionary *)state
+{
+    if (![[state objectForKey:kStateDictInAlternateScreen] intValue] && temp_buffer) {
+        free(temp_buffer);
+        temp_buffer = NULL;
+    }
+
+    SAVE_CURSOR_X = [[state objectForKey:kStateDictBaseCursorX] intValue];
+    SAVE_CURSOR_Y = [[state objectForKey:kStateDictBaseCursorY] intValue];
+    cursorX = [[state objectForKey:kStateDictCursorX] intValue];
+    cursorY = [[state objectForKey:kStateDictCursorY] intValue];
+    SCROLL_TOP = [[state objectForKey:kStateDictScrollRegionUpper] intValue];
+    SCROLL_BOTTOM = [[state objectForKey:kStateDictScrollRegionLower] intValue];
+    [self showCursor:[[state objectForKey:kStateDictCursorMode] boolValue]];
+
+    [tabStops removeAllObjects];
+    for (NSNumber *n in [state objectForKey:kStateDictTabstops]) {
+        [tabStops addObject:n];
+    }
+
+    // TODO: The way that tmux and iterm2 handle saving the cursor position is different and incompatible and only one of us is right.
+    // tmux saves the cursor position for DECSC in one location and for the non-alt screen in a separate location.
+    // iterm2 saves the cursor position for the base screen in one location and for the alternate screen in another location.
+    // At a minimum, we differ in how we handle DECSC. 
+    // After resolving this confusion, do the right thing with these state fields:
+    // kStateDictDECSCCursorX;
+    // kStateDictDECSCCursorY;
 }
 
 - (FindContext*)findContext
@@ -3749,6 +3909,18 @@ void DumpBuf(screen_char_t* p, int n) {
     return the_line;
 }
 
+- (screen_char_t *)_getDefaultLineWithChar:(screen_char_t)defaultChar {
+    NSMutableData *data = [NSMutableData data];
+    for (int i = 0; i < WIDTH; i++) {
+        [data appendBytes:&defaultChar length:sizeof(defaultChar)];
+    }
+    screen_char_t eol;
+    memset(&eol, 0, sizeof(eol));
+    eol.code = EOL_HARD;
+    [data appendBytes:&eol length:sizeof(eol)];
+    return data.mutableBytes;
+}
+
 // returns a line set to default character and attributes
 // released when session is closed
 - (screen_char_t*)_getDefaultLineWithWidth:(int)width
@@ -3813,6 +3985,16 @@ void DumpBuf(screen_char_t* p, int n) {
     assert(dropped == 0 || dropped == 1);
 
     return dropped;
+}
+
+- (screen_char_t)defaultChar {
+    screen_char_t fg = [TERMINAL foregroundColorCodeReal];
+    screen_char_t bg = [TERMINAL backgroundColorCodeReal];
+    screen_char_t c;
+    memset(&c, 0, sizeof(c));
+    CopyForegroundColor(&c, fg);
+    CopyBackgroundColor(&c, bg);
+    return c;
 }
 
 - (void)_setInitialTabStops
