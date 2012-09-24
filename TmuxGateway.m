@@ -10,7 +10,7 @@
 #import "TmuxController.h"
 #import "iTermApplicationDelegate.h"
 
-#define NEWLINE @"\r\n"
+#define NEWLINE @"\r"
 
 #define TMUX_VERBOSE_LOGGING
 #ifdef TMUX_VERBOSE_LOGGING
@@ -343,11 +343,13 @@ static NSString *kCommandObject = @"object";
 - (void)sendKeys:(NSData *)data toWindowPane:(int)windowPane
 {
     NSString *encoded = [self stringForKeyEncodedData:data];
+    [delegate_ tmuxSetSecureLogging:YES];
     NSString *command = [NSString stringWithFormat:@"send-keys -t %%%d %@",
                          windowPane, encoded];
     [self sendCommand:command
          responseTarget:self
          responseSelector:@selector(noopResponseSelector:)];
+    [delegate_ tmuxSetSecureLogging:NO];
 }
 
 - (void)detach
