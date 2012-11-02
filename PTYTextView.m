@@ -955,7 +955,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 
 - (double)lineHeight
 {
-    return ceil(lineHeight);
+    return lineHeight;
 }
 
 - (void)setLineHeight:(double)aLineHeight
@@ -965,7 +965,7 @@ static CGFloat PerceivedBrightness(CGFloat r, CGFloat g, CGFloat b) {
 
 - (double)charWidth
 {
-    return ceil(charWidth);
+  return charWidth;
 }
 
 - (void)setCharWidth:(double)width
