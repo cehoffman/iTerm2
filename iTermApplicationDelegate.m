@@ -262,7 +262,11 @@ static BOOL hasBecomeActive = NO;
     CFStringRef unixExecutableContentType = (CFStringRef)@"public.unix-executable";
     CFStringRef unixHandler = LSCopyDefaultRoleHandlerForContentType(unixExecutableContentType, kLSRolesShell);
     NSString *iTermBundleId = [[NSBundle mainBundle] bundleIdentifier];
-    return [iTermBundleId isEqualToString:(NSString *)unixHandler];
+    BOOL result = [iTermBundleId isEqualToString:(NSString *)unixHandler];
+    if (unixHandler) {
+        CFRelease(unixHandler);
+    }
+    return result;
 }
 
 - (NSString *)quietFileName {
@@ -287,8 +291,13 @@ static BOOL hasBecomeActive = NO;
     }
 }
 
+- (void)updateToggleToolbarTitle {
+    [toggleToolbar setTitle:[self toolbarShouldBeVisible] ? @"Hide Toolbar" : @"Show Toolbar"];
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification
 {
+    [self updateToggleToolbarTitle];
     [iTermFontPanel makeDefault];
 
     finishedLaunching_ = YES;
@@ -498,12 +507,20 @@ static BOOL hasBecomeActive = NO;
     return YES;
 }
 
+- (void)userDidInteractWithASession
+{
+    userHasInteractedWithAnySession_ = YES;
+}
+
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app
 {
-    NSNumber* pref = [[NSUserDefaults standardUserDefaults] objectForKey:@"MinRunningTime"];
-    const double kMinRunningTime =  pref ? [pref floatValue] : 10;
-    if ([[NSDate date] timeIntervalSinceDate:launchTime_] < kMinRunningTime) {
-        return NO;
+    if (!userHasInteractedWithAnySession_) {
+        NSNumber* pref = [[NSUserDefaults standardUserDefaults] objectForKey:@"MinRunningTime"];
+        const double kMinRunningTime =  pref ? [pref floatValue] : 10;
+        if ([[NSDate date] timeIntervalSinceDate:launchTime_] < kMinRunningTime) {
+            NSLog(@"Not quitting iTerm2 because it ran very briefly and had no user interaction. Set the MinRunningTime float preference to 0 to turn this feature off.");
+            return NO;
+        }
     }
     quittingBecauseLastWindowClosed_ = [[PreferencePanel sharedInstance] quitWhenAllWindowsClosed];
     return quittingBecauseLastWindowClosed_;
@@ -537,6 +554,19 @@ static BOOL hasBecomeActive = NO;
 
 - (void)applicationDidChangeScreenParameters:(NSNotification *)aNotification
 {
+    // The screens' -visibleFrame is not updated when this is called. Doing a delayed perform with
+    // a delay of 0 is usually, but not always enough. Not that 1 second is always enough either,
+    // I suppose, but I don't want to die on this hill.
+    NSNumber *delay = [[NSUserDefaults standardUserDefaults] objectForKey:@"UpdateScreenParamsDelay"];
+    if (!delay) {
+        delay = [NSNumber numberWithInt:1];
+    }
+    [self performSelector:@selector(updateScreenParametersInAllTerminals)
+               withObject:nil
+               afterDelay:[delay intValue]];
+}
+
+- (void)updateScreenParametersInAllTerminals {
     // Make sure that all top-of-screen windows are the proper width.
     for (PseudoTerminal* term in [self terminals]) {
         [term screenParametersDidChange];
@@ -635,6 +665,16 @@ static BOOL hasBecomeActive = NO;
         n = [NSNumber numberWithBool:NO];
     }
     return [n boolValue];
+}
+
+- (BOOL)toolbarShouldBeVisible {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ToolbarVisible"];
+}
+
+- (void)setToolbarShouldBeVisible:(BOOL)value {
+    [[NSUserDefaults standardUserDefaults] setBool:value
+                                            forKey:@"ToolbarVisible"];
+    [self updateToggleToolbarTitle];
 }
 
 - (IBAction)toggleToolbelt:(id)sender
@@ -749,6 +789,9 @@ static BOOL hasBecomeActive = NO;
         return;
     }
     id bm = [[PreferencePanel sharedInstance] handlerBookmarkForURL:urlType];
+    if (!bm) {
+        bm = [[ProfileModel sharedInstance] defaultBookmark];
+    }
     if (bm) {
         PseudoTerminal *term = [[iTermController sharedInstance] currentTerminal];
         [[iTermController sharedInstance] launchBookmark:bm
@@ -912,8 +955,6 @@ static BOOL hasBecomeActive = NO;
     [[[[iTermController sharedInstance] currentTerminal] currentSession] changeFontSizeDirection:-1];
 }
 
-
-
 static void SwapDebugLog() {
         NSMutableString* temp;
         temp = gDebugLogStr;
@@ -990,35 +1031,38 @@ static void FlushDebugLog() {
 // Debug logging
 -(IBAction)debugLogging:(id)sender
 {
-        if (!gDebugLogging) {
-                NSRunAlertPanel(@"Debug Logging Enabled",
-                                                @"Writing to /tmp/debuglog.txt",
-                                                @"OK", nil, nil);
-                gDebugLogFile = open("/tmp/debuglog.txt", O_TRUNC | O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);
-                gDebugLogStr = [[NSMutableString alloc] init];
-                gDebugLogStr2 = [[NSMutableString alloc] init];
-                gDebugLogging = !gDebugLogging;
-        } else {
-                gDebugLogging = !gDebugLogging;
-                SwapDebugLog();
-                FlushDebugLog();
-                SwapDebugLog();
-                FlushDebugLog();
-
-                close(gDebugLogFile);
-                gDebugLogFile=-1;
-                NSRunAlertPanel(@"Debug Logging Stopped",
-                                                @"Please compress and send /tmp/debuglog.txt to the developers.",
-                                                @"OK", nil, nil);
-                [gDebugLogStr release];
-                [gDebugLogStr2 release];
-        }
+    if (!gDebugLogging) {
+        NSRunAlertPanel(@"Debug Logging Enabled",
+                        @"Writing to /tmp/debuglog.txt",
+                        @"OK", nil, nil);
+        gDebugLogFile = open("/tmp/debuglog.txt", O_TRUNC | O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);
+        gDebugLogStr = [[NSMutableString alloc] init];
+        gDebugLogStr2 = [[NSMutableString alloc] init];
+        gDebugLogging = !gDebugLogging;
+    } else {
+        gDebugLogging = !gDebugLogging;
+        SwapDebugLog();
+        FlushDebugLog();
+        SwapDebugLog();
+        FlushDebugLog();
+        
+        close(gDebugLogFile);
+        gDebugLogFile=-1;
+        NSRunAlertPanel(@"Debug Logging Stopped",
+                        @"Please compress and send /tmp/debuglog.txt to the developers.",
+                        @"OK", nil, nil);
+        [gDebugLogStr release];
+        [gDebugLogStr2 release];
+    }
 }
 
 int DebugLogImpl(const char *file, int line, const char *function, NSString* value)
 {
     if (gDebugLogging) {
-        [gDebugLogStr appendFormat:@"%s:%d (%s): ", file, line, function];
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+
+        [gDebugLogStr appendFormat:@"%ld.%08ld %s:%d (%s): ", (long long)tv.tv_sec, (long long)tv.tv_usec, file, line, function];
         [gDebugLogStr appendString:value];
         [gDebugLogStr appendString:@"\n"];
         if ([gDebugLogStr length] > 100000000) {
@@ -1096,8 +1140,8 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
     [textview setFont:font nafont:nafont horizontalSpacing:hs verticalSpacing:vs];
         if ([sender isAlternate]) {
                 [frontTerminal sessionInitiatedResize:session
-                                                                                width:[[abEntry objectForKey:KEY_COLUMNS] intValue]
-                                                                           height:[[abEntry objectForKey:KEY_ROWS] intValue]];
+                                                width:[[abEntry objectForKey:KEY_COLUMNS] intValue]
+                                               height:[[abEntry objectForKey:KEY_ROWS] intValue]];
         }
 }
 
@@ -1324,7 +1368,7 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
     [scriptIcon setSize: NSMakeSize(16, 16)];
 
     // create menu item with no title and set image
-    NSMenuItem *scriptMenuItem = [[NSMenuItem alloc] initWithTitle: @"" action: nil keyEquivalent: @""];
+    NSMenuItem *scriptMenuItem = [[[NSMenuItem alloc] initWithTitle: @"" action: nil keyEquivalent: @""] autorelease];
     [scriptMenuItem setImage: scriptIcon];
 
     // create submenu
@@ -1370,7 +1414,6 @@ int DebugLogImpl(const char *file, int line, const char *function, NSString* val
     // add new menu item
     if (count) {
         [[NSApp mainMenu] insertItem:scriptMenuItem atIndex:5];
-        [scriptMenuItem release];
         [scriptMenuItem setTitle:NSLocalizedStringFromTableInBundle(@"Script",
                                                                     @"iTerm",
                                                                     [NSBundle bundleForClass:[iTermController class]],
